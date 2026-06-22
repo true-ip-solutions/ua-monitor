@@ -215,12 +215,13 @@ def _pd_source():
 
 def _pd_changes(count, data):
     detected_at = data.get('detected_at', datetime.now().strftime('%c'))
-    lines = []
-    for change in data.get('changes', []):
-        lines.append(
-            f"Device: {change['device']} | "
-            f"IP: {change['old_ip']} -> {change['new_ip']} | "
-            f"UA: {change['old_ua']} -> {change['new_ua']}"
+    blocks = []
+    for i, change in enumerate(data.get('changes', []), 1):
+        blocks.append(
+            f"[{i}] {change['device']}\n"
+            f"     IP  : {change['old_ip']} -> {change['new_ip']}\n"
+            f"     FROM: {change['old_ua']}\n"
+            f"     TO  : {change['new_ua']}"
         )
 
     payload = {
@@ -232,7 +233,7 @@ def _pd_changes(count, data):
             "severity": PD_SEVERITY_CHANGE,
             "custom_details": {
                 "detected_at": detected_at,
-                "changes":     "\n".join(lines),
+                "changes":     "\n\n".join(blocks),
             }
         }
     }
