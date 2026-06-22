@@ -20,7 +20,7 @@ A lightweight SIP device registration monitor for **VoIPmonitor** environments. 
 VoIPmonitor passively captures SIP traffic and stores registration events in MySQL. UA Monitor queries that data every 5 minutes, compares each device's current registration against a known-state tracking table, and fires alerts when something changes.
 
 ```
-voipmonitor.register_state  ──►  ua_monitor.device_ua  ──►  notify.sh  ──►  Slack / Email / Teams
+voipmonitor.register_state  ──►  ua_monitor.device_ua  ──►  notify.sh  ──►  Slack / Email / Teams / PagerDuty
      (live SIP data)               (known state)            (router)         (your choice)
 ```
 
@@ -34,7 +34,7 @@ All changes are written to the tracking database and a local log file regardless
 - MySQL/MariaDB (already present with VoIPmonitor)
 - `sip-register = yes` in `/etc/voipmonitor.conf`
 - `curl` and `bash` (already present)
-- A Slack webhook, email (sendmail/mailutils), or Teams webhook
+- A Slack webhook, email (sendmail/mailutils), Teams webhook, or PagerDuty Events API v2 routing key
 
 ---
 
@@ -51,7 +51,7 @@ curl -fsSL https://raw.githubusercontent.com/traviscw/ua-monitor/main/install.sh
 You will be prompted for:
 - MySQL root password
 - UA Monitor DB password (a new password you choose)
-- Notification provider (Slack / email / Teams) and credentials
+- Notification provider (Slack / email / Teams / PagerDuty) and credentials
 - Alert mode, digest frequency, and octet ignore settings
 
 The script will download all files, configure credentials, set permissions, run the database setup, seed the device table, and optionally install cron jobs — all in one shot.
@@ -72,7 +72,7 @@ mysql -u root -p < setup.sql
 
 ```bash
 sudo mkdir -p /opt/ua_monitor
-sudo cp check_ua.sh query.sql notify.sh notify_slack.sh notify_email.sh notify_teams.sh suppress.conf /opt/ua_monitor/
+sudo cp check_ua.sh query.sql notify.sh notify_slack.sh notify_email.sh notify_teams.sh notify_pagerduty.sh suppress.conf /opt/ua_monitor/
 ```
 
 #### 3. Set Credentials
@@ -98,9 +98,16 @@ For Teams, edit `notify_teams.sh`:
 TEAMS_WEBHOOK="https://outlook.office.com/webhook/XXXX"
 ```
 
+For PagerDuty, edit `notify_pagerduty.sh`:
+```bash
+PD_ROUTING_KEY="your-32-char-integration-key"
+PD_SEVERITY_CHANGE="warning"     # critical | error | warning | info
+PD_SEVERITY_NEW_DEVICE="info"    # critical | error | warning | info
+```
+
 Then set your provider in `notify.sh`:
 ```bash
-NOTIFY_PROVIDER="slack"   # slack | email | teams
+NOTIFY_PROVIDER="slack"   # slack | email | teams | pagerduty
 ```
 
 #### 4. Set Permissions
@@ -111,6 +118,7 @@ sudo chmod 700 /opt/ua_monitor/notify.sh
 sudo chmod 700 /opt/ua_monitor/notify_slack.sh
 sudo chmod 700 /opt/ua_monitor/notify_email.sh
 sudo chmod 700 /opt/ua_monitor/notify_teams.sh
+sudo chmod 700 /opt/ua_monitor/notify_pagerduty.sh
 sudo chmod 700 /opt/ua_monitor/cleanup.sh
 sudo chmod 600 /opt/ua_monitor/suppress.conf
 sudo chmod 600 /opt/ua_monitor/query.sql
@@ -161,6 +169,7 @@ Add:
 | `notify_slack.sh` | Slack notification handler |
 | `notify_email.sh` | Email notification handler |
 | `notify_teams.sh` | Microsoft Teams notification handler |
+| `notify_pagerduty.sh` | PagerDuty Events API v2 notification handler |
 | `suppress.conf` | Suppression rules |
 | `setup.sql` | MySQL setup — run once on fresh install |
 | `cleanup.sh` | Weekly stale device removal |
@@ -181,7 +190,7 @@ Add:
 
 | Setting | Options | Description |
 |---|---|---|
-| `NOTIFY_PROVIDER` | `slack` `email` `teams` | Which notification script to use |
+| `NOTIFY_PROVIDER` | `slack` `email` `teams` `pagerduty` | Which notification script to use |
 
 ### Alert Modes
 
@@ -209,6 +218,32 @@ Add:
 | `30min` | Batches new devices and sends every 30 minutes |
 | `hourly` | Batches new devices and sends every hour |
 | `daily` | Batches new devices and sends once a day |
+
+### notify_pagerduty.sh
+
+| Setting | Default | Description |
+|---|---|---|
+| `PD_ROUTING_KEY` | *(required)* | Integration Key from your PagerDuty service's Events API v2 integration |
+| `PD_SOURCE` | hostname | Source field in PagerDuty incidents — leave empty to auto-detect from `hostname` |
+| `PD_SEVERITY_CHANGE` | `warning` | Severity for UA/IP change alerts (`critical` / `error` / `warning` / `info`) |
+| `PD_SEVERITY_NEW_DEVICE` | `info` | Severity for new device digest alerts |
+
+Each cron run that detects changes creates a new, distinct PagerDuty incident (no deduplication). If you prefer to deduplicate repeated change alerts into a single open incident, set a static `dedup_key` in the `notify_changes` function inside `notify_pagerduty.sh`.
+
+---
+
+## PagerDuty Service Setup
+
+Before running the installer you need an Integration Key from PagerDuty. Here is how to get one:
+
+1. Log in to PagerDuty and go to **Services** in the top navigation.
+2. Select an existing service to receive UA Monitor alerts, or create a new one (e.g. "VoIP Infrastructure").
+3. Open the **Integrations** tab on that service and click **Add an integration**.
+4. Search for **Events API v2** and select it, then click **Add**.
+5. Click the integration name to expand it and copy the **Integration Key** (a 32-character alphanumeric string).
+6. Paste that key when the installer prompts for the PagerDuty routing key, or set `PD_ROUTING_KEY` manually in `notify_pagerduty.sh`.
+
+Alerts are sent to `https://events.pagerduty.com/v2/enqueue` using an HTTP POST. No additional PagerDuty agent or SDK is required — only `curl`, which is already present on any VoIPmonitor server.
 
 ---
 

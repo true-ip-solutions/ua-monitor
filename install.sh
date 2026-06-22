@@ -49,7 +49,7 @@ ask "UA Monitor DB password (will be set for the ua_monitor MySQL user):"
 read -rsp "  > " DB_PASS
 echo ""
 
-ask "Notification provider (slack / email / teams) [slack]:"
+ask "Notification provider (slack / email / teams / pagerduty) [slack]:"
 read -r NOTIFY_PROVIDER
 NOTIFY_PROVIDER="${NOTIFY_PROVIDER:-slack}"
 
@@ -69,8 +69,20 @@ case "$NOTIFY_PROVIDER" in
         ask "Microsoft Teams webhook URL:"
         read -r TEAMS_WEBHOOK
         ;;
+    pagerduty)
+        ask "PagerDuty Events API v2 routing key (Integration Key from your PagerDuty service):"
+        read -r PD_ROUTING_KEY
+        [ -z "$PD_ROUTING_KEY" ] && err "Routing key cannot be empty"
+        ask "Alert severity for device changes (critical / error / warning / info) [warning]:"
+        read -r PD_SEVERITY_CHANGE
+        PD_SEVERITY_CHANGE="${PD_SEVERITY_CHANGE:-warning}"
+        case "$PD_SEVERITY_CHANGE" in
+            critical|error|warning|info) ;;
+            *) err "Invalid severity: $PD_SEVERITY_CHANGE — must be critical, error, warning, or info" ;;
+        esac
+        ;;
     *)
-        err "Unknown provider: $NOTIFY_PROVIDER — must be slack, email, or teams"
+        err "Unknown provider: $NOTIFY_PROVIDER — must be slack, email, teams, or pagerduty"
         ;;
 esac
 
@@ -97,7 +109,7 @@ echo "========================================"
 
 mkdir -p "$INSTALL_DIR"
 
-FILES=(check_ua.sh notify.sh notify_slack.sh notify_email.sh notify_teams.sh query.sql suppress.conf cleanup.sh)
+FILES=(check_ua.sh notify.sh notify_slack.sh notify_email.sh notify_teams.sh notify_pagerduty.sh query.sql suppress.conf cleanup.sh)
 
 for f in "${FILES[@]}"; do
     curl -fsSL "${GITHUB_REPO}/${f}" -o "${INSTALL_DIR}/${f}" \
@@ -134,6 +146,12 @@ if [ "$NOTIFY_PROVIDER" = "teams" ]; then
     sed -i "s|TEAMS_WEBHOOK=\"https://outlook.office.com/webhook/XXXX\"|TEAMS_WEBHOOK=\"${TEAMS_WEBHOOK}\"|" "${INSTALL_DIR}/notify_teams.sh"
 fi
 
+# notify_pagerduty.sh
+if [ "$NOTIFY_PROVIDER" = "pagerduty" ]; then
+    sed -i "s|PD_ROUTING_KEY=\"XXXX\"|PD_ROUTING_KEY=\"${PD_ROUTING_KEY}\"|" "${INSTALL_DIR}/notify_pagerduty.sh"
+    sed -i "s|PD_SEVERITY_CHANGE=\"warning\"|PD_SEVERITY_CHANGE=\"${PD_SEVERITY_CHANGE}\"|" "${INSTALL_DIR}/notify_pagerduty.sh"
+fi
+
 # cleanup.sh
 sed -i "s|DB_PASS=\"yourpassword\"|DB_PASS=\"${DB_PASS}\"|" "${INSTALL_DIR}/cleanup.sh"
 
@@ -148,6 +166,7 @@ chmod 700 "${INSTALL_DIR}/notify.sh"
 chmod 700 "${INSTALL_DIR}/notify_slack.sh"
 chmod 700 "${INSTALL_DIR}/notify_email.sh"
 chmod 700 "${INSTALL_DIR}/notify_teams.sh"
+chmod 700 "${INSTALL_DIR}/notify_pagerduty.sh"
 chmod 700 "${INSTALL_DIR}/cleanup.sh"
 chmod 600 "${INSTALL_DIR}/suppress.conf"
 chmod 600 "${INSTALL_DIR}/query.sql"
