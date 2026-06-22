@@ -133,48 +133,69 @@ python3 -m pip install --quiet pymysql \
 ok "Python dependencies installed"
 
 # -----------------------------------------------------------------------
-# Configure files
+# Write configuration file
 # -----------------------------------------------------------------------
 
-# check_ua.py
-sed -i "s|= \"yourpassword\"|= \"${DB_PASS}\"|"         "${INSTALL_DIR}/check_ua.py"
-sed -i "s|= \"ua_or_ip\"|= \"${ALERT_MODE}\"|"          "${INSTALL_DIR}/check_ua.py"
-sed -i "s|= \"every_run\"|= \"${NEW_DEVICE_DIGEST}\"|"  "${INSTALL_DIR}/check_ua.py"
-sed -i "s|IGNORE_OCTET_COUNT = 0|IGNORE_OCTET_COUNT = ${IGNORE_OCTET_COUNT}|" \
-    "${INSTALL_DIR}/check_ua.py"
+# Only write if one doesn't already exist (preserve credentials on reinstall)
+if [ -f "${INSTALL_DIR}/ua_monitor.conf" ]; then
+    warn "ua_monitor.conf already exists — skipping (credentials preserved)"
+else
+    cat > "${INSTALL_DIR}/ua_monitor.conf" << EOF
+[database]
+db_user = ua_monitor
+db_pass = ${DB_PASS}
+db_host = localhost
 
-# notify.py — provider selection
-sed -i "s|NOTIFY_PROVIDER = \"slack\"|NOTIFY_PROVIDER = \"${NOTIFY_PROVIDER}\"|" \
-    "${INSTALL_DIR}/notify.py"
+[monitor]
+log_file = ${LOG}
+suppress_conf = ${INSTALL_DIR}/suppress.conf
+lookback_minutes = 6
+alert_mode = ${ALERT_MODE}
+new_device_digest = ${NEW_DEVICE_DIGEST}
+ignore_octet_count = ${IGNORE_OCTET_COUNT}
+retention_days = 90
 
-if [ "$NOTIFY_PROVIDER" = "slack" ]; then
-    sed -i "s|SLACK_WEBHOOK = \"https://hooks.slack.com/services/XXXX/XXXX/XXXX\"|SLACK_WEBHOOK = \"${SLACK_WEBHOOK}\"|" \
-        "${INSTALL_DIR}/notify.py"
+[notify]
+provider = ${NOTIFY_PROVIDER}
+EOF
+
+    case "$NOTIFY_PROVIDER" in
+        slack)
+            cat >> "${INSTALL_DIR}/ua_monitor.conf" << EOF
+
+[slack]
+webhook = ${SLACK_WEBHOOK}
+EOF
+            ;;
+        email)
+            cat >> "${INSTALL_DIR}/ua_monitor.conf" << EOF
+
+[email]
+to = ${EMAIL_TO}
+from = ${EMAIL_FROM}
+EOF
+            ;;
+        teams)
+            cat >> "${INSTALL_DIR}/ua_monitor.conf" << EOF
+
+[teams]
+webhook = ${TEAMS_WEBHOOK}
+EOF
+            ;;
+        pagerduty)
+            cat >> "${INSTALL_DIR}/ua_monitor.conf" << EOF
+
+[pagerduty]
+routing_key = ${PD_ROUTING_KEY}
+source =
+severity_change = ${PD_SEVERITY_CHANGE}
+severity_new_device = info
+EOF
+            ;;
+    esac
+
+    ok "Configuration written"
 fi
-
-if [ "$NOTIFY_PROVIDER" = "email" ]; then
-    sed -i "s|EMAIL_TO   = \"admin@yourdomain.com\"|EMAIL_TO   = \"${EMAIL_TO}\"|" \
-        "${INSTALL_DIR}/notify.py"
-    sed -i "s|EMAIL_FROM = \"ua-monitor@yourdomain.com\"|EMAIL_FROM = \"${EMAIL_FROM}\"|" \
-        "${INSTALL_DIR}/notify.py"
-fi
-
-if [ "$NOTIFY_PROVIDER" = "teams" ]; then
-    sed -i "s|TEAMS_WEBHOOK = \"https://outlook.office.com/webhook/XXXX\"|TEAMS_WEBHOOK = \"${TEAMS_WEBHOOK}\"|" \
-        "${INSTALL_DIR}/notify.py"
-fi
-
-if [ "$NOTIFY_PROVIDER" = "pagerduty" ]; then
-    sed -i "s|PD_ROUTING_KEY       = \"XXXX\"|PD_ROUTING_KEY       = \"${PD_ROUTING_KEY}\"|" \
-        "${INSTALL_DIR}/notify.py"
-    sed -i "s|PD_SEVERITY_CHANGE   = \"warning\"|PD_SEVERITY_CHANGE   = \"${PD_SEVERITY_CHANGE}\"|" \
-        "${INSTALL_DIR}/notify.py"
-fi
-
-# cleanup.py
-sed -i "s|= \"yourpassword\"|= \"${DB_PASS}\"|" "${INSTALL_DIR}/cleanup.py"
-
-ok "Files configured"
 
 # -----------------------------------------------------------------------
 # Permissions
@@ -184,6 +205,7 @@ chmod 700 "${INSTALL_DIR}/check_ua.py"
 chmod 700 "${INSTALL_DIR}/notify.py"
 chmod 700 "${INSTALL_DIR}/cleanup.py"
 chmod 600 "${INSTALL_DIR}/suppress.conf"
+chmod 600 "${INSTALL_DIR}/ua_monitor.conf"
 
 touch "$LOG"
 chmod 640 "$LOG"
