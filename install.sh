@@ -2,7 +2,7 @@
 # UA Monitor Installer
 # Pulls latest files from GitHub and configures the system
 
-GITHUB_REPO="https://raw.githubusercontent.com/traviscw/ua-monitor/main"
+GITHUB_REPO="${GITHUB_REPO:-https://raw.githubusercontent.com/traviscw/ua-monitor/main}"
 INSTALL_DIR="/opt/ua_monitor"
 LOG="/var/log/ua_monitor.log"
 
