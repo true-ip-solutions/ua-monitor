@@ -7,6 +7,7 @@
 
 import sys
 import logging
+import configparser
 from datetime import datetime
 from pathlib import Path
 
@@ -14,35 +15,24 @@ import pymysql
 import pymysql.cursors
 
 # -----------------------------------------------------------------------
-# Configuration — set by install.sh
+# Configuration — read from /opt/ua_monitor/ua_monitor.conf
 # -----------------------------------------------------------------------
 
-DB_USER            = "ua_monitor"
-DB_PASS            = "yourpassword"
-DB_HOST            = "localhost"
-LOG_FILE           = "/var/log/ua_monitor.log"
-SUPPRESS_CONF      = "/opt/ua_monitor/suppress.conf"
-LOOKBACK_MINUTES   = 6
+_cfg = configparser.ConfigParser()
+_cfg.read("/opt/ua_monitor/ua_monitor.conf")
 
-# Alert mode options:
-#   ua_only    — alert only when UA changes (ignore IP changes)
-#   ip_only    — alert only when IP changes (ignore UA changes)
-#   ua_and_ip  — alert only when BOTH UA and IP change together
-#   ua_or_ip   — alert when either UA or IP changes (default)
-ALERT_MODE         = "ua_or_ip"
+def _get(section, key, fallback=''):
+    return _cfg.get(section, key, fallback=fallback)
 
-# New device digest frequency:
-#   every_run  — send at the end of every cron run
-#   30min      — batch and send every 30 minutes
-#   hourly     — batch and send every hour
-#   daily      — batch and send once a day
-NEW_DEVICE_DIGEST  = "every_run"
-
-# How many octets to ignore when comparing IP changes (0 = disabled)
-# 1 = ignore last octet only      (e.g. 192.168.1.100 -> 192.168.1.200 ignored)
-# 2 = ignore last two octets      (e.g. 192.168.1.x -> 192.168.2.x ignored)
-# 3 = ignore last three octets    (e.g. 192.x.x.x -> 192.x.x.x ignored)
-IGNORE_OCTET_COUNT = 0
+DB_USER            = _get('database', 'db_user',       'ua_monitor')
+DB_PASS            = _get('database', 'db_pass')
+DB_HOST            = _get('database', 'db_host',       'localhost')
+LOG_FILE           = _get('monitor',  'log_file',      '/var/log/ua_monitor.log')
+SUPPRESS_CONF      = _get('monitor',  'suppress_conf', '/opt/ua_monitor/suppress.conf')
+LOOKBACK_MINUTES   = int(_get('monitor', 'lookback_minutes',   '6'))
+ALERT_MODE         = _get('monitor',  'alert_mode',         'ua_or_ip')
+NEW_DEVICE_DIGEST  = _get('monitor',  'new_device_digest',  'every_run')
+IGNORE_OCTET_COUNT = int(_get('monitor', 'ignore_octet_count', '0'))
 
 # -----------------------------------------------------------------------
 # Logging
