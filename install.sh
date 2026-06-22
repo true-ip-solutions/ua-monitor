@@ -32,8 +32,15 @@ echo ""
 
 [ "$EUID" -ne 0 ] && err "Please run as root: sudo bash install.sh"
 
-command -v mysql  &>/dev/null || err "mysql client not found — is VoIPmonitor installed?"
-command -v curl   &>/dev/null || err "curl not found — please install: apt install curl"
+command -v mysql   &>/dev/null || err "mysql client not found — is VoIPmonitor installed?"
+command -v curl    &>/dev/null || err "curl not found — please install: apt install curl"
+command -v python3 &>/dev/null || err "python3 not found — please install: apt install python3 python3-pip"
+
+# Ensure pip is available
+if ! python3 -m pip --version &>/dev/null; then
+    warn "pip not found — attempting to install..."
+    apt-get install -y python3-pip &>/dev/null || err "Failed to install python3-pip — please install manually"
+fi
 
 ok "Prerequisites OK"
 
@@ -49,7 +56,7 @@ ask "UA Monitor DB password (will be set for the ua_monitor MySQL user):"
 read -rsp "  > " DB_PASS
 echo ""
 
-ask "Notification provider (slack / email / teams) [slack]:"
+ask "Notification provider (slack / email / teams / pagerduty) [slack]:"
 read -r NOTIFY_PROVIDER
 NOTIFY_PROVIDER="${NOTIFY_PROVIDER:-slack}"
 
@@ -69,8 +76,20 @@ case "$NOTIFY_PROVIDER" in
         ask "Microsoft Teams webhook URL:"
         read -r TEAMS_WEBHOOK
         ;;
+    pagerduty)
+        ask "PagerDuty Events API v2 routing key (Integration Key from your PagerDuty service):"
+        read -r PD_ROUTING_KEY
+        [ -z "$PD_ROUTING_KEY" ] && err "Routing key cannot be empty"
+        ask "Alert severity for device changes (critical / error / warning / info) [warning]:"
+        read -r PD_SEVERITY_CHANGE
+        PD_SEVERITY_CHANGE="${PD_SEVERITY_CHANGE:-warning}"
+        case "$PD_SEVERITY_CHANGE" in
+            critical|error|warning|info) ;;
+            *) err "Invalid severity: $PD_SEVERITY_CHANGE — must be critical, error, warning, or info" ;;
+        esac
+        ;;
     *)
-        err "Unknown provider: $NOTIFY_PROVIDER — must be slack, email, or teams"
+        err "Unknown provider: $NOTIFY_PROVIDER — must be slack, email, teams, or pagerduty"
         ;;
 esac
 
@@ -97,7 +116,7 @@ echo "========================================"
 
 mkdir -p "$INSTALL_DIR"
 
-FILES=(check_ua.sh notify.sh notify_slack.sh notify_email.sh notify_teams.sh query.sql suppress.conf cleanup.sh)
+FILES=(check_ua.py notify.py cleanup.py suppress.conf)
 
 for f in "${FILES[@]}"; do
     curl -fsSL "${GITHUB_REPO}/${f}" -o "${INSTALL_DIR}/${f}" \
@@ -106,36 +125,54 @@ for f in "${FILES[@]}"; do
 done
 
 # -----------------------------------------------------------------------
+# Install Python dependencies
+# -----------------------------------------------------------------------
+
+python3 -m pip install --quiet pymysql \
+    || err "Failed to install pymysql — check pip and network connectivity"
+ok "Python dependencies installed"
+
+# -----------------------------------------------------------------------
 # Configure files
 # -----------------------------------------------------------------------
 
-# check_ua.sh
-sed -i "s|DB_PASS=\"yourpassword\"|DB_PASS=\"${DB_PASS}\"|" "${INSTALL_DIR}/check_ua.sh"
-sed -i "s|ALERT_MODE=\"ua_or_ip\"|ALERT_MODE=\"${ALERT_MODE}\"|" "${INSTALL_DIR}/check_ua.sh"
-sed -i "s|NEW_DEVICE_DIGEST=\"every_run\"|NEW_DEVICE_DIGEST=\"${NEW_DEVICE_DIGEST}\"|" "${INSTALL_DIR}/check_ua.sh"
-sed -i "s|IGNORE_OCTET_COUNT=0|IGNORE_OCTET_COUNT=${IGNORE_OCTET_COUNT}|" "${INSTALL_DIR}/check_ua.sh"
+# check_ua.py
+sed -i "s|= \"yourpassword\"|= \"${DB_PASS}\"|"         "${INSTALL_DIR}/check_ua.py"
+sed -i "s|= \"ua_or_ip\"|= \"${ALERT_MODE}\"|"          "${INSTALL_DIR}/check_ua.py"
+sed -i "s|= \"every_run\"|= \"${NEW_DEVICE_DIGEST}\"|"  "${INSTALL_DIR}/check_ua.py"
+sed -i "s|IGNORE_OCTET_COUNT = 0|IGNORE_OCTET_COUNT = ${IGNORE_OCTET_COUNT}|" \
+    "${INSTALL_DIR}/check_ua.py"
 
-# notify.sh
-sed -i "s|NOTIFY_PROVIDER=\"slack\"|NOTIFY_PROVIDER=\"${NOTIFY_PROVIDER}\"|" "${INSTALL_DIR}/notify.sh"
+# notify.py — provider selection
+sed -i "s|NOTIFY_PROVIDER = \"slack\"|NOTIFY_PROVIDER = \"${NOTIFY_PROVIDER}\"|" \
+    "${INSTALL_DIR}/notify.py"
 
-# notify_slack.sh
 if [ "$NOTIFY_PROVIDER" = "slack" ]; then
-    sed -i "s|SLACK_WEBHOOK=\"https://hooks.slack.com/services/XXXX/XXXX/XXXX\"|SLACK_WEBHOOK=\"${SLACK_WEBHOOK}\"|" "${INSTALL_DIR}/notify_slack.sh"
+    sed -i "s|SLACK_WEBHOOK = \"https://hooks.slack.com/services/XXXX/XXXX/XXXX\"|SLACK_WEBHOOK = \"${SLACK_WEBHOOK}\"|" \
+        "${INSTALL_DIR}/notify.py"
 fi
 
-# notify_email.sh
 if [ "$NOTIFY_PROVIDER" = "email" ]; then
-    sed -i "s|EMAIL_TO=\"admin@yourdomain.com\"|EMAIL_TO=\"${EMAIL_TO}\"|" "${INSTALL_DIR}/notify_email.sh"
-    sed -i "s|EMAIL_FROM=\"ua-monitor@yourdomain.com\"|EMAIL_FROM=\"${EMAIL_FROM}\"|" "${INSTALL_DIR}/notify_email.sh"
+    sed -i "s|EMAIL_TO   = \"admin@yourdomain.com\"|EMAIL_TO   = \"${EMAIL_TO}\"|" \
+        "${INSTALL_DIR}/notify.py"
+    sed -i "s|EMAIL_FROM = \"ua-monitor@yourdomain.com\"|EMAIL_FROM = \"${EMAIL_FROM}\"|" \
+        "${INSTALL_DIR}/notify.py"
 fi
 
-# notify_teams.sh
 if [ "$NOTIFY_PROVIDER" = "teams" ]; then
-    sed -i "s|TEAMS_WEBHOOK=\"https://outlook.office.com/webhook/XXXX\"|TEAMS_WEBHOOK=\"${TEAMS_WEBHOOK}\"|" "${INSTALL_DIR}/notify_teams.sh"
+    sed -i "s|TEAMS_WEBHOOK = \"https://outlook.office.com/webhook/XXXX\"|TEAMS_WEBHOOK = \"${TEAMS_WEBHOOK}\"|" \
+        "${INSTALL_DIR}/notify.py"
 fi
 
-# cleanup.sh
-sed -i "s|DB_PASS=\"yourpassword\"|DB_PASS=\"${DB_PASS}\"|" "${INSTALL_DIR}/cleanup.sh"
+if [ "$NOTIFY_PROVIDER" = "pagerduty" ]; then
+    sed -i "s|PD_ROUTING_KEY       = \"XXXX\"|PD_ROUTING_KEY       = \"${PD_ROUTING_KEY}\"|" \
+        "${INSTALL_DIR}/notify.py"
+    sed -i "s|PD_SEVERITY_CHANGE   = \"warning\"|PD_SEVERITY_CHANGE   = \"${PD_SEVERITY_CHANGE}\"|" \
+        "${INSTALL_DIR}/notify.py"
+fi
+
+# cleanup.py
+sed -i "s|= \"yourpassword\"|= \"${DB_PASS}\"|" "${INSTALL_DIR}/cleanup.py"
 
 ok "Files configured"
 
@@ -143,14 +180,10 @@ ok "Files configured"
 # Permissions
 # -----------------------------------------------------------------------
 
-chmod 700 "${INSTALL_DIR}/check_ua.sh"
-chmod 700 "${INSTALL_DIR}/notify.sh"
-chmod 700 "${INSTALL_DIR}/notify_slack.sh"
-chmod 700 "${INSTALL_DIR}/notify_email.sh"
-chmod 700 "${INSTALL_DIR}/notify_teams.sh"
-chmod 700 "${INSTALL_DIR}/cleanup.sh"
+chmod 700 "${INSTALL_DIR}/check_ua.py"
+chmod 700 "${INSTALL_DIR}/notify.py"
+chmod 700 "${INSTALL_DIR}/cleanup.py"
 chmod 600 "${INSTALL_DIR}/suppress.conf"
-chmod 600 "${INSTALL_DIR}/query.sql"
 
 touch "$LOG"
 chmod 640 "$LOG"
@@ -180,7 +213,7 @@ ok "Database configured"
 
 echo ""
 echo "  Seeding device database (scanning last 24 hours)..."
-"${INSTALL_DIR}/check_ua.sh" --seed
+python3 "${INSTALL_DIR}/check_ua.py" --seed
 ok "Seed complete"
 
 # -----------------------------------------------------------------------
@@ -195,8 +228,8 @@ INSTALL_CRON="${INSTALL_CRON:-y}"
 if [[ "$INSTALL_CRON" =~ ^[Yy]$ ]]; then
     # Check if cron entries already exist
     crontab -l 2>/dev/null | grep -q "ua_monitor" && warn "Cron entries already exist — skipping" || {
-        (crontab -l 2>/dev/null; echo "*/5 * * * * ${INSTALL_DIR}/check_ua.sh") | crontab -
-        (crontab -l 2>/dev/null; echo "0 3 * * 0 ${INSTALL_DIR}/cleanup.sh") | crontab -
+        (crontab -l 2>/dev/null; echo "*/5 * * * * python3 ${INSTALL_DIR}/check_ua.py") | crontab -
+        (crontab -l 2>/dev/null; echo "0 3 * * 0 python3 ${INSTALL_DIR}/cleanup.py") | crontab -
         ok "Cron jobs installed"
     }
 fi
@@ -218,5 +251,5 @@ echo "  Digest:       $NEW_DEVICE_DIGEST"
 echo ""
 echo "  Useful commands:"
 echo "    tail -f $LOG"
-echo "    ${INSTALL_DIR}/check_ua.sh"
+echo "    python3 ${INSTALL_DIR}/check_ua.py"
 echo ""
