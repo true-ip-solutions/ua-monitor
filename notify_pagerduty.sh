@@ -16,9 +16,15 @@ send_pagerduty() {
 }
 
 # Escape a string for safe embedding in a JSON value field.
-# Handles backslashes, double quotes, and control characters.
+# Uses bash substitution so actual newlines are converted to \n rather
+# than being dropped by sed's line-by-line processing.
 json_escape() {
-    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g'
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\t'/\\t}"
+    s="${s//$'\n'/\\n}"
+    printf '%s' "$s"
 }
 
 # -----------------------------------------------------------------------
@@ -46,7 +52,7 @@ notify_changes() {
                 ;;
             ALERT_END)
                 in_alert=false
-                details="${details}Device: ${device} | IP: ${old_ip} -> ${new_ip} | UA: ${old_ua} -> ${new_ua}\n"
+                details="${details}Device: ${device} | IP: ${old_ip} -> ${new_ip} | UA: ${old_ua} -> ${new_ua}"$'\n'
                 ;;
             REGS_START) in_regs=true ;;
             REGS_END)   in_regs=false ;;
