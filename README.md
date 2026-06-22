@@ -11,7 +11,7 @@ SOFTWARE.
 
 # UA Monitor
 
-A lightweight SIP device registration monitor for **VoIPmonitor** environments. Detects when a registered device's User Agent string or IP address changes and alerts your team — via Slack, email, or Microsoft Teams. Built entirely in bash with no additional software requirements beyond what VoIPmonitor already installs.
+A lightweight SIP device registration monitor for **VoIPmonitor** environments. Detects when a registered device's User Agent string or IP address changes and alerts your team — via Slack, email, Microsoft Teams, or PagerDuty. Written in Python with a single persistent MySQL connection for fast, low-overhead cron execution.
 
 ---
 
@@ -20,7 +20,7 @@ A lightweight SIP device registration monitor for **VoIPmonitor** environments. 
 VoIPmonitor passively captures SIP traffic and stores registration events in MySQL. UA Monitor queries that data every 5 minutes, compares each device's current registration against a known-state tracking table, and fires alerts when something changes.
 
 ```
-voipmonitor.register_state  ──►  ua_monitor.device_ua  ──►  notify.sh  ──►  Slack / Email / Teams
+voipmonitor.register_state  ──►  ua_monitor.device_ua  ──►  notify.py  ──►  Slack / Email / Teams / PagerDuty
      (live SIP data)               (known state)            (router)         (your choice)
 ```
 
@@ -33,8 +33,10 @@ All changes are written to the tracking database and a local log file regardless
 - VoIPmonitor server running Ubuntu/Debian
 - MySQL/MariaDB (already present with VoIPmonitor)
 - `sip-register = yes` in `/etc/voipmonitor.conf`
-- `curl` and `bash` (already present)
-- A Slack webhook, email (sendmail/mailutils), or Teams webhook
+- Python 3.6+ and pip (`apt install python3 python3-pip`)
+- PyMySQL (`pip3 install pymysql`) — installed automatically by the installer
+- `curl` (already present) — used by the installer to download files
+- A Slack webhook, email (sendmail/postfix), Teams webhook, or PagerDuty Events API v2 routing key
 
 ---
 
@@ -51,10 +53,10 @@ curl -fsSL https://raw.githubusercontent.com/traviscw/ua-monitor/main/install.sh
 You will be prompted for:
 - MySQL root password
 - UA Monitor DB password (a new password you choose)
-- Notification provider (Slack / email / Teams) and credentials
+- Notification provider (Slack / email / Teams / PagerDuty) and credentials
 - Alert mode, digest frequency, and octet ignore settings
 
-The script will download all files, configure credentials, set permissions, run the database setup, seed the device table, and optionally install cron jobs — all in one shot.
+The script will download all files, install Python dependencies, configure credentials, set permissions, run the database setup, seed the device table, and optionally install cron jobs — all in one shot.
 
 ---
 
@@ -68,60 +70,65 @@ Update the password in `setup.sql` first, then:
 mysql -u root -p < setup.sql
 ```
 
-#### 2. Deploy Files
+#### 2. Install Python Dependencies
+
+```bash
+pip3 install pymysql
+```
+
+#### 3. Deploy Files
 
 ```bash
 sudo mkdir -p /opt/ua_monitor
-sudo cp check_ua.sh query.sql notify.sh notify_slack.sh notify_email.sh notify_teams.sh suppress.conf /opt/ua_monitor/
+sudo cp check_ua.py notify.py cleanup.py suppress.conf /opt/ua_monitor/
 ```
 
-#### 3. Set Credentials
+#### 4. Set Credentials
 
-Edit `check_ua.sh`:
-```bash
-DB_PASS="yourpassword"
+Edit `check_ua.py`:
+```python
+DB_PASS = "yourpassword"
 ```
 
-Edit your chosen notification script. For Slack, edit `notify_slack.sh`:
-```bash
-SLACK_WEBHOOK="https://hooks.slack.com/services/XXXX/XXXX/XXXX"
+Edit `notify.py` — set your provider and credentials:
+```python
+NOTIFY_PROVIDER = "slack"   # slack | email | teams | pagerduty
+
+# Slack
+SLACK_WEBHOOK = "https://hooks.slack.com/services/XXXX/XXXX/XXXX"
+
+# Email
+EMAIL_TO   = "admin@yourdomain.com"
+EMAIL_FROM = "ua-monitor@yourdomain.com"
+
+# Teams
+TEAMS_WEBHOOK = "https://outlook.office.com/webhook/XXXX"
+
+# PagerDuty
+PD_ROUTING_KEY     = "your-32-char-integration-key"
+PD_SEVERITY_CHANGE = "warning"    # critical | error | warning | info
 ```
 
-For email, edit `notify_email.sh`:
-```bash
-EMAIL_TO="admin@yourdomain.com"
-EMAIL_FROM="ua-monitor@yourdomain.com"
+Edit `cleanup.py`:
+```python
+DB_PASS = "yourpassword"
 ```
 
-For Teams, edit `notify_teams.sh`:
-```bash
-TEAMS_WEBHOOK="https://outlook.office.com/webhook/XXXX"
-```
-
-Then set your provider in `notify.sh`:
-```bash
-NOTIFY_PROVIDER="slack"   # slack | email | teams
-```
-
-#### 4. Set Permissions
+#### 5. Set Permissions
 
 ```bash
-sudo chmod 700 /opt/ua_monitor/check_ua.sh
-sudo chmod 700 /opt/ua_monitor/notify.sh
-sudo chmod 700 /opt/ua_monitor/notify_slack.sh
-sudo chmod 700 /opt/ua_monitor/notify_email.sh
-sudo chmod 700 /opt/ua_monitor/notify_teams.sh
-sudo chmod 700 /opt/ua_monitor/cleanup.sh
+sudo chmod 700 /opt/ua_monitor/check_ua.py
+sudo chmod 700 /opt/ua_monitor/notify.py
+sudo chmod 700 /opt/ua_monitor/cleanup.py
 sudo chmod 600 /opt/ua_monitor/suppress.conf
-sudo chmod 600 /opt/ua_monitor/query.sql
 sudo touch /var/log/ua_monitor.log
 sudo chmod 640 /var/log/ua_monitor.log
 ```
 
-#### 5. Seed the Database
+#### 6. Seed the Database
 
 ```bash
-sudo /opt/ua_monitor/check_ua.sh --seed
+sudo python3 /opt/ua_monitor/check_ua.py --seed
 ```
 
 Verify:
@@ -130,13 +137,13 @@ mysql -u"ua_monitor" -p'yourpassword' -e "SELECT COUNT(*) FROM ua_monitor.device
 tail -20 /var/log/ua_monitor.log
 ```
 
-#### 6. Test Run
+#### 7. Test Run
 
 ```bash
-sudo /opt/ua_monitor/check_ua.sh
+sudo python3 /opt/ua_monitor/check_ua.py
 ```
 
-#### 7. Enable Cron
+#### 8. Enable Cron
 
 ```bash
 sudo crontab -e
@@ -144,8 +151,8 @@ sudo crontab -e
 
 Add:
 ```
-*/5 * * * * /opt/ua_monitor/check_ua.sh
-0 3 * * 0 /opt/ua_monitor/cleanup.sh
+*/5 * * * * python3 /opt/ua_monitor/check_ua.py
+0 3 * * 0 python3 /opt/ua_monitor/cleanup.py
 ```
 
 ---
@@ -155,21 +162,17 @@ Add:
 | File | Description |
 |---|---|
 | `install.sh` | Automated installer — pulls from GitHub and configures everything |
-| `check_ua.sh` | Main monitoring script — runs on cron every 5 minutes |
-| `query.sql` | Change detection SQL query |
-| `notify.sh` | Notification router — set your provider here |
-| `notify_slack.sh` | Slack notification handler |
-| `notify_email.sh` | Email notification handler |
-| `notify_teams.sh` | Microsoft Teams notification handler |
+| `check_ua.py` | Main monitoring script — runs on cron every 5 minutes |
+| `notify.py` | Notification router and provider implementations (Slack, email, Teams, PagerDuty) |
+| `cleanup.py` | Weekly stale device removal |
 | `suppress.conf` | Suppression rules |
 | `setup.sql` | MySQL setup — run once on fresh install |
-| `cleanup.sh` | Weekly stale device removal |
 
 ---
 
 ## Configuration
 
-### check_ua.sh
+### check_ua.py
 
 | Setting | Options | Description |
 |---|---|---|
@@ -177,11 +180,11 @@ Add:
 | `NEW_DEVICE_DIGEST` | `every_run` `30min` `hourly` `daily` | How often to send new device summary |
 | `IGNORE_OCTET_COUNT` | `0` `1` `2` `3` | How many IP octets to ignore when comparing |
 
-### notify.sh
+### notify.py
 
 | Setting | Options | Description |
 |---|---|---|
-| `NOTIFY_PROVIDER` | `slack` `email` `teams` | Which notification script to use |
+| `NOTIFY_PROVIDER` | `slack` `email` `teams` `pagerduty` | Which notification provider to use |
 
 ### Alert Modes
 
@@ -209,6 +212,32 @@ Add:
 | `30min` | Batches new devices and sends every 30 minutes |
 | `hourly` | Batches new devices and sends every hour |
 | `daily` | Batches new devices and sends once a day |
+
+### PagerDuty (notify.py)
+
+| Setting | Default | Description |
+|---|---|---|
+| `PD_ROUTING_KEY` | *(required)* | Integration Key from your PagerDuty service's Events API v2 integration |
+| `PD_SOURCE` | hostname | Source field in PagerDuty incidents — leave empty to auto-detect from `hostname` |
+| `PD_SEVERITY_CHANGE` | `warning` | Severity for UA/IP change alerts (`critical` / `error` / `warning` / `info`) |
+| `PD_SEVERITY_NEW_DEVICE` | `info` | Severity for new device digest alerts |
+
+Each cron run that detects changes creates a new, distinct PagerDuty incident (no deduplication). If you prefer to deduplicate repeated change alerts into a single open incident, set a static `dedup_key` in the `_pd_changes` function inside `notify.py`.
+
+---
+
+## PagerDuty Service Setup
+
+Before running the installer you need an Integration Key from PagerDuty. Here is how to get one:
+
+1. Log in to PagerDuty and go to **Services** in the top navigation.
+2. Select an existing service to receive UA Monitor alerts, or create a new one (e.g. "VoIP Infrastructure").
+3. Open the **Integrations** tab on that service and click **Add an integration**.
+4. Search for **Events API v2** and select it, then click **Add**.
+5. Click the integration name to expand it and copy the **Integration Key** (a 32-character alphanumeric string).
+6. Paste that key when the installer prompts for the PagerDuty routing key, or set `PD_ROUTING_KEY` manually in `notify.py`.
+
+Alerts are sent to `https://events.pagerduty.com/v2/enqueue` using Python's standard `urllib` library — no additional packages beyond PyMySQL are required.
 
 ---
 
@@ -242,7 +271,7 @@ New devices are queued and sent as a single batched table on the configured dige
 
 ```bash
 # Seed or reseed the tracking database
-sudo /opt/ua_monitor/check_ua.sh --seed
+sudo python3 /opt/ua_monitor/check_ua.py --seed
 
 # Watch the log live
 tail -f /var/log/ua_monitor.log
