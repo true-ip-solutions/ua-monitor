@@ -7,7 +7,7 @@ SELECT
     COALESCE(d.contact_ip, 'NONE') AS known_ip,
     CASE WHEN d.from_num IS NULL THEN 'new' ELSE 'changed' END AS change_type
 FROM (
-    SELECT r1.from_num, r1.to_domain, r1.sipcallerip, r1.ua_id
+    SELECT r1.from_num, r1.to_domain, MAX(r1.sipcallerip) AS sipcallerip, MAX(r1.ua_id) AS ua_id
     FROM voipmonitor.register_state r1
     INNER JOIN (
         -- FIX: added LIMIT 1 via MAX(created_at) subquery to prevent
