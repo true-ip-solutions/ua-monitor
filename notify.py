@@ -7,33 +7,36 @@
 
 import smtplib
 import json
+import configparser
 import urllib.request
 import urllib.error
 from email.mime.text import MIMEText
 from datetime import datetime
 
 # -----------------------------------------------------------------------
-# Configuration — set by install.sh
+# Configuration — read from /opt/ua_monitor/ua_monitor.conf
 # -----------------------------------------------------------------------
 
-NOTIFY_PROVIDER = "slack"   # slack | email | teams | pagerduty
+_cfg = configparser.ConfigParser()
+_cfg.read("/opt/ua_monitor/ua_monitor.conf")
 
-# Slack
-SLACK_WEBHOOK = "https://hooks.slack.com/services/XXXX/XXXX/XXXX"
+def _get(section, key, fallback=''):
+    return _cfg.get(section, key, fallback=fallback)
 
-# Email
-EMAIL_TO   = "admin@yourdomain.com"
-EMAIL_FROM = "ua-monitor@yourdomain.com"
+NOTIFY_PROVIDER        = _get('notify',    'provider',           'slack')
 
-# Microsoft Teams
-TEAMS_WEBHOOK = "https://outlook.office.com/webhook/XXXX"
+SLACK_WEBHOOK          = _get('slack',     'webhook')
 
-# PagerDuty
-PD_ROUTING_KEY       = "XXXX"
-PD_SOURCE            = ""           # leave empty to use socket.gethostname()
-PD_SEVERITY_CHANGE   = "warning"    # critical | error | warning | info
-PD_SEVERITY_NEW_DEVICE = "info"     # critical | error | warning | info
-PD_API_URL           = "https://events.pagerduty.com/v2/enqueue"
+EMAIL_TO               = _get('email',     'to')
+EMAIL_FROM             = _get('email',     'from')
+
+TEAMS_WEBHOOK          = _get('teams',     'webhook')
+
+PD_ROUTING_KEY         = _get('pagerduty', 'routing_key')
+PD_SOURCE              = _get('pagerduty', 'source')
+PD_SEVERITY_CHANGE     = _get('pagerduty', 'severity_change',     'warning')
+PD_SEVERITY_NEW_DEVICE = _get('pagerduty', 'severity_new_device', 'info')
+PD_API_URL             = "https://events.pagerduty.com/v2/enqueue"
 
 # -----------------------------------------------------------------------
 # Helpers
