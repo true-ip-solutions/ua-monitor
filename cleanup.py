@@ -7,19 +7,26 @@
 #   0 3 * * 0 /opt/ua_monitor/cleanup.py
 
 import logging
+import configparser
 
 import pymysql
 import pymysql.cursors
 
 # -----------------------------------------------------------------------
-# Configuration — set by install.sh
+# Configuration — read from /opt/ua_monitor/ua_monitor.conf
 # -----------------------------------------------------------------------
 
-DB_USER         = "ua_monitor"
-DB_PASS         = "yourpassword"
-DB_HOST         = "localhost"
-LOG_FILE        = "/var/log/ua_monitor.log"
-RETENTION_DAYS  = 90
+_cfg = configparser.ConfigParser()
+_cfg.read("/opt/ua_monitor/ua_monitor.conf")
+
+def _get(section, key, fallback=''):
+    return _cfg.get(section, key, fallback=fallback)
+
+DB_USER        = _get('database', 'db_user',       'ua_monitor')
+DB_PASS        = _get('database', 'db_pass')
+DB_HOST        = _get('database', 'db_host',       'localhost')
+LOG_FILE       = _get('monitor',  'log_file',      '/var/log/ua_monitor.log')
+RETENTION_DAYS = int(_get('monitor', 'retention_days', '90'))
 
 # -----------------------------------------------------------------------
 # Logging
