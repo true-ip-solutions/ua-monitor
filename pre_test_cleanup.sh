@@ -40,7 +40,7 @@ echo ""
 # -----------------------------------------------------------------------
 
 echo -e "${YELLOW}UA Monitor DB password (needed to truncate tracking tables):${NC}"
-read -rsp "  > " DB_PASS
+read -rsp "  > " DB_PASS < /dev/tty
 echo ""
 
 # -----------------------------------------------------------------------
