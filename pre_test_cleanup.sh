@@ -1,16 +1,17 @@
 #!/bin/bash
 # pre_test_cleanup.sh
 #
-# Removes remnants of a prior bash-based ua-monitor installation so the
-# Python rewrite can be tested from a clean state.
+# Removes remnants of a prior ua-monitor installation so a clean test
+# can be run from scratch.
 #
 # What this script does:
-#   1. Removes old bash scripts from INSTALL_DIR
+#   1. Removes old bash scripts from INSTALL_DIR (if any remain)
 #   2. Removes ua_monitor cron entries
-#   3. Truncates ua_monitor DB tables (device_ua, new_device_queue, digest_log)
-#   4. Clears the log file
+#   3. Truncates ua_monitor DB tables (device_ua, change_log)
+#   4. Clears the log file and digest timestamp
 #
-# It does NOT touch the Python scripts (.py files) or suppress.conf.
+# It does NOT touch the Python scripts (.py files), suppress.conf,
+# or ua_monitor.conf.
 #
 # Usage:
 #   sudo bash pre_test_cleanup.sh
@@ -91,15 +92,14 @@ fi
 
 mysql -u"ua_monitor" -p"${DB_PASS}" ua_monitor 2>/dev/null <<'SQL'
 TRUNCATE TABLE device_ua;
-TRUNCATE TABLE new_device_queue;
-TRUNCATE TABLE digest_log;
+TRUNCATE TABLE change_log;
 SQL
 
 if [ $? -eq 0 ]; then
-    ok "Truncated ua_monitor tables (device_ua, new_device_queue, digest_log)"
+    ok "Truncated ua_monitor tables (device_ua, change_log)"
 else
     warn "DB truncate failed — check password or run manually:"
-    warn "  mysql -u'ua_monitor' -p'yourpassword' ua_monitor -e 'TRUNCATE TABLE device_ua; TRUNCATE TABLE new_device_queue; TRUNCATE TABLE digest_log;'"
+    warn "  mysql -u'ua_monitor' -p'yourpassword' ua_monitor -e 'TRUNCATE TABLE device_ua; TRUNCATE TABLE change_log;'"
 fi
 
 # -----------------------------------------------------------------------
@@ -111,13 +111,20 @@ if [ -f "$LOG" ]; then
     ok "Cleared $LOG"
 fi
 
+# Clear digest timestamp so next digest run treats everything as new
+DIGEST_TS="/opt/ua_monitor/last_digest.ts"
+if [ -f "$DIGEST_TS" ]; then
+    rm -f "$DIGEST_TS"
+    ok "Removed digest timestamp ($DIGEST_TS)"
+fi
+
 # -----------------------------------------------------------------------
 # Done
 # -----------------------------------------------------------------------
 
 echo ""
 echo "========================================"
-echo -e "${GREEN}  Cleanup complete. Ready to test Python rewrite.${NC}"
+echo -e "${GREEN}  Cleanup complete. Ready for a clean test run.${NC}"
 echo "========================================"
 echo ""
 echo "  Next steps:"

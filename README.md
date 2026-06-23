@@ -1,5 +1,5 @@
 ## USE AT YOUR OWN RISK, THIS IS NOT FULLY TESTED
-## As always, have backups, and firewall. 
+## As always, have backups, and firewall.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
@@ -11,7 +11,7 @@ SOFTWARE.
 
 # UA Monitor
 
-A lightweight SIP device registration monitor for **VoIPmonitor** environments. Detects when a registered device's User Agent string or IP address changes and alerts your team — via Slack, email, Microsoft Teams, or PagerDuty. Written in Python with a single persistent MySQL connection for fast, low-overhead cron execution.
+A lightweight SIP device registration monitor for **VoIPmonitor** environments. Detects when a registered device's User Agent string or IP address changes and alerts your team via Slack, email, Microsoft Teams, or PagerDuty. Written in Python with a single persistent MySQL connection for fast, low-overhead cron execution.
 
 ---
 
@@ -24,7 +24,7 @@ voipmonitor.register_state  ──►  ua_monitor.device_ua  ──►  notify.p
      (live SIP data)               (known state)            (router)         (your choice)
 ```
 
-All changes are written to the tracking database and a local log file regardless of alert settings.
+Each alert is also written to a `change_log` table that deduplicates repeated notifications and drives a daily email digest. All activity is written to a local log file regardless of alert settings.
 
 ---
 
@@ -35,8 +35,8 @@ All changes are written to the tracking database and a local log file regardless
 - `sip-register = yes` in `/etc/voipmonitor.conf`
 - Python 3.6+ and pip (`apt install python3 python3-pip`)
 - PyMySQL (`pip3 install pymysql`) — installed automatically by the installer
-- `curl` (already present) — used by the installer to download files
-- A Slack webhook, email (sendmail/postfix), Teams webhook, or PagerDuty Events API v2 routing key
+- `curl` — used by the installer to download files
+- A Slack webhook, email relay (sendmail/postfix), Teams webhook, or PagerDuty Events API v2 routing key
 
 ---
 
@@ -51,12 +51,15 @@ curl -fsSL https://raw.githubusercontent.com/traviscw/ua-monitor/main/install.sh
 ```
 
 You will be prompted for:
-- MySQL root password
+- MySQL root password (for one-time DB setup)
 - UA Monitor DB password (a new password you choose)
 - Notification provider (Slack / email / Teams / PagerDuty) and credentials
-- Alert mode, digest frequency, and octet ignore settings
+- Alert mode and mobile UA prefixes
+- Digest recipient and sender email addresses
+- Octet ignore count
+- Whether to install cron jobs and the digest cron schedule
 
-The script will download all files, install Python dependencies, configure credentials, set permissions, run the database setup, seed the device table, and optionally install cron jobs — all in one shot.
+The script downloads all files, installs Python dependencies, writes the configuration file, sets permissions, runs the database setup, seeds the device table, and optionally installs cron jobs.
 
 ---
 
@@ -64,7 +67,7 @@ The script will download all files, install Python dependencies, configure crede
 
 #### 1. Run MySQL Setup
 
-Update the password in `setup.sql` first, then:
+Update the password placeholder in `setup.sql`, then:
 
 ```bash
 mysql -u root -p < setup.sql
@@ -80,38 +83,16 @@ pip3 install pymysql
 
 ```bash
 sudo mkdir -p /opt/ua_monitor
-sudo cp check_ua.py notify.py cleanup.py suppress.conf /opt/ua_monitor/
+sudo cp check_ua.py notify.py cleanup.py digest.py suppress.conf /opt/ua_monitor/
 ```
 
-#### 4. Set Credentials
+#### 4. Create Configuration File
 
-Edit `check_ua.py`:
-```python
-DB_PASS = "yourpassword"
-```
+Copy `ua_monitor.conf.example` to `/opt/ua_monitor/ua_monitor.conf` and fill in your values:
 
-Edit `notify.py` — set your provider and credentials:
-```python
-NOTIFY_PROVIDER = "slack"   # slack | email | teams | pagerduty
-
-# Slack
-SLACK_WEBHOOK = "https://hooks.slack.com/services/XXXX/XXXX/XXXX"
-
-# Email
-EMAIL_TO   = "admin@yourdomain.com"
-EMAIL_FROM = "ua-monitor@yourdomain.com"
-
-# Teams
-TEAMS_WEBHOOK = "https://outlook.office.com/webhook/XXXX"
-
-# PagerDuty
-PD_ROUTING_KEY     = "your-32-char-integration-key"
-PD_SEVERITY_CHANGE = "warning"    # critical | error | warning | info
-```
-
-Edit `cleanup.py`:
-```python
-DB_PASS = "yourpassword"
+```bash
+sudo cp ua_monitor.conf.example /opt/ua_monitor/ua_monitor.conf
+sudo chmod 600 /opt/ua_monitor/ua_monitor.conf
 ```
 
 #### 5. Set Permissions
@@ -120,6 +101,7 @@ DB_PASS = "yourpassword"
 sudo chmod 700 /opt/ua_monitor/check_ua.py
 sudo chmod 700 /opt/ua_monitor/notify.py
 sudo chmod 700 /opt/ua_monitor/cleanup.py
+sudo chmod 700 /opt/ua_monitor/digest.py
 sudo chmod 600 /opt/ua_monitor/suppress.conf
 sudo touch /var/log/ua_monitor.log
 sudo chmod 640 /var/log/ua_monitor.log
@@ -153,6 +135,7 @@ Add:
 ```
 */5 * * * * python3 /opt/ua_monitor/check_ua.py
 0 3 * * 0 python3 /opt/ua_monitor/cleanup.py
+0 7 * * * python3 /opt/ua_monitor/digest.py
 ```
 
 ---
@@ -164,114 +147,217 @@ Add:
 | `install.sh` | Automated installer — pulls from GitHub and configures everything |
 | `check_ua.py` | Main monitoring script — runs on cron every 5 minutes |
 | `notify.py` | Notification router and provider implementations (Slack, email, Teams, PagerDuty) |
-| `cleanup.py` | Weekly stale device removal |
-| `suppress.conf` | Suppression rules |
+| `cleanup.py` | Weekly cleanup — removes stale devices and ages out old change_log entries |
+| `digest.py` | Daily HTML email digest of the change_log |
+| `suppress.conf` | Suppression rules — devices/UAs to never alert on |
 | `setup.sql` | MySQL setup — run once on fresh install |
+| `ua_monitor.conf.example` | Reference configuration file with all options documented |
 
 ---
 
 ## Configuration
 
-### check_ua.py
+All settings live in `/opt/ua_monitor/ua_monitor.conf`. Changes take effect on the next cron run — no restart needed. The file should be `chmod 600` as it contains database credentials.
 
-| Setting | Options | Description |
+### [database]
+
+| Key | Default | Description |
 |---|---|---|
-| `ALERT_MODE` | `ua_only` `ip_only` `ua_and_ip` `ua_or_ip` | What triggers an alert |
-| `NEW_DEVICE_DIGEST` | `every_run` `30min` `hourly` `daily` | How often to send new device summary |
-| `IGNORE_OCTET_COUNT` | `0` `1` `2` `3` | How many IP octets to ignore when comparing |
+| `db_user` | `ua_monitor` | MySQL username |
+| `db_pass` | *(required)* | MySQL password |
+| `db_host` | `localhost` | MySQL host |
 
-### notify.py
+### [monitor]
 
-| Setting | Options | Description |
+| Key | Default | Description |
 |---|---|---|
-| `NOTIFY_PROVIDER` | `slack` `email` `teams` `pagerduty` | Which notification provider to use |
+| `log_file` | `/var/log/ua_monitor.log` | Path to the log file |
+| `suppress_conf` | `/opt/ua_monitor/suppress.conf` | Path to the suppression rules file |
+| `lookback_minutes` | `6` | How far back to query `register_state` each run |
+| `alert_mode` | `auto` | How changes are evaluated — see Alert Modes below |
+| `ignore_octet_count` | `0` | How many trailing IP octets to ignore — see Octet Ignore below |
+| `retention_days` | `90` | Days before an unseen device is removed from `device_ua` |
 
-### Alert Modes
+### [alert_rules]
 
-| Mode | Behaviour |
-|---|---|
-| `ua_only` | Alert only when the UA string changes |
-| `ip_only` | Alert only when the IP address changes |
-| `ua_and_ip` | Alert only when **both** UA and IP change together |
-| `ua_or_ip` | Alert when **either** changes *(default)* |
-
-### Octet Ignore
-
-| Setting | Behaviour |
-|---|---|
-| `0` | All IP changes alert *(default)* |
-| `1` | Ignores last octet — `192.168.1.x` changes ignored |
-| `2` | Ignores last two octets — `192.168.x.x` changes ignored |
-| `3` | Ignores last three octets — `192.x.x.x` changes ignored |
-
-### New Device Digest
-
-| Setting | Behaviour |
-|---|---|
-| `every_run` | Sends at the end of every 5-minute cron run |
-| `30min` | Batches new devices and sends every 30 minutes |
-| `hourly` | Batches new devices and sends every hour |
-| `daily` | Batches new devices and sends once a day |
-
-### PagerDuty (notify.py)
-
-| Setting | Default | Description |
+| Key | Default | Description |
 |---|---|---|
-| `PD_ROUTING_KEY` | *(required)* | Integration Key from your PagerDuty service's Events API v2 integration |
-| `PD_SOURCE` | hostname | Source field in PagerDuty incidents — leave empty to auto-detect from `hostname` |
-| `PD_SEVERITY_CHANGE` | `warning` | Severity for UA/IP change alerts (`critical` / `error` / `warning` / `info`) |
-| `PD_SEVERITY_NEW_DEVICE` | `info` | Severity for new device digest alerts |
+| `mobile_ua_prefixes` | *(empty)* | Comma-separated UA prefixes treated as mobile/softphone. Case-insensitive prefix match. Everything else is treated as hardware. |
 
-Each cron run that detects changes creates a new, distinct PagerDuty incident (no deduplication). If you prefer to deduplicate repeated change alerts into a single open incident, set a static `dedup_key` in the `_pd_changes` function inside `notify.py`.
+Example:
+```ini
+[alert_rules]
+mobile_ua_prefixes = snapmobile,zoiper,groundwire,bria,linphone,ringotel
+```
+
+### [notify]
+
+| Key | Options | Description |
+|---|---|---|
+| `provider` | `slack` `email` `teams` `pagerduty` | Which notification provider to use |
+
+Add only the section that matches your provider.
+
+**[slack]**
+```ini
+[slack]
+webhook = https://hooks.slack.com/services/XXXX/XXXX/XXXX
+```
+
+**[email]**
+```ini
+[email]
+to = admin@yourdomain.com
+from = ua-monitor@yourdomain.com
+```
+
+**[teams]**
+```ini
+[teams]
+webhook = https://outlook.office.com/webhook/XXXX
+```
+
+**[pagerduty]**
+```ini
+[pagerduty]
+routing_key = your-32-char-integration-key
+source =
+severity_change = warning
+```
+
+### [digest]
+
+| Key | Default | Description |
+|---|---|---|
+| `to` | *(required)* | Recipient email address |
+| `from` | *(required)* | Sender email address |
+| `subject` | `[UA Monitor] Daily Change Log Digest` | Email subject line |
+| `smtp_host` | `localhost` | SMTP relay host |
 
 ---
 
-## PagerDuty Service Setup
+## Alert Modes
 
-Before running the installer you need an Integration Key from PagerDuty. Here is how to get one:
+Set via `alert_mode` in `[monitor]`.
 
-1. Log in to PagerDuty and go to **Services** in the top navigation.
-2. Select an existing service to receive UA Monitor alerts, or create a new one (e.g. "VoIP Infrastructure").
-3. Open the **Integrations** tab on that service and click **Add an integration**.
-4. Search for **Events API v2** and select it, then click **Add**.
-5. Click the integration name to expand it and copy the **Integration Key** (a 32-character alphanumeric string).
-6. Paste that key when the installer prompts for the PagerDuty routing key, or set `PD_ROUTING_KEY` manually in `notify.py`.
+| Mode | Behaviour |
+|---|---|
+| `auto` | Per-device classification based on UA type — **recommended** |
+| `ua_only` | Alert only when the UA string changes |
+| `ip_only` | Alert only when the IP address changes |
+| `ua_and_ip` | Alert only when **both** UA and IP change together |
+| `ua_or_ip` | Alert when **either** UA or IP changes |
 
-Alerts are sent to `https://events.pagerduty.com/v2/enqueue` using Python's standard `urllib` library — no additional packages beyond PyMySQL are required.
+### Auto Mode
+
+`auto` applies different alert logic depending on whether the devices involved are classified as hardware or mobile/softphone:
+
+| Old UA | New UA | Alert condition |
+|---|---|---|
+| Hardware | Hardware | Both UA **and** IP must change |
+| Mobile | Mobile | UA must change |
+| Hardware | Mobile (or vice versa) | Always alert (cross-category) |
+
+UA classification is driven by `mobile_ua_prefixes` in `[alert_rules]`. Any UA not matching a prefix is treated as hardware. Unknown or blank UAs also default to hardware treatment.
+
+This mode significantly reduces false positives from extensions registered to multiple devices while still catching cross-category changes that are the most common fraud indicator.
+
+---
+
+## Alert Deduplication
+
+When an alert fires, both the old and new UA strings are written to a `change_log` table. On subsequent checks, if the same UA reappears on the same extension, the `hit_count` counter is incremented but no new alert is sent. A fresh alert only fires when a UA that is not in the change_log for that extension is detected.
+
+Writing both directions (old → new and new → old) on first alert prevents oscillation — if a device flips back to its previous UA, that is also already in the log and will not re-alert.
+
+Change_log entries age out automatically after 30 days of inactivity (no new hits). Once aged out, the UA is treated as unknown again and will re-alert if it reappears.
+
+---
+
+## Daily Digest
+
+`digest.py` sends an HTML email summarizing change_log activity. It is designed to run daily via cron and give your support team a list of extensions to follow up on.
+
+**Default behavior (cron run):** Sends only entries whose `first_seen` is newer than the previous digest run. The timestamp is stored in `/opt/ua_monitor/last_digest.ts` and updated after each successful send.
+
+**Full mode:** Sends all active change_log entries regardless of when they were first seen.
+
+```bash
+# New entries only (cron)
+python3 /opt/ua_monitor/digest.py
+
+# Full change log (manual trigger)
+python3 /opt/ua_monitor/digest.py --full
+```
+
+The digest always sends, even if there are no new entries, so you have a daily confirmation that the system is running.
+
+Row highlighting in the digest table:
+- **Yellow** — extension has 5 or more hits (recurring change, likely misconfiguration)
+- **Amber** — extension has 10 or more hits (persistent issue, prioritize for support call)
 
 ---
 
 ## Suppression Rules
 
-Edit `/opt/ua_monitor/suppress.conf`. Changes take effect on the next cron run — no restart needed.
+Edit `/opt/ua_monitor/suppress.conf`. Lines starting with `#` are comments. Changes take effect on the next cron run.
 
 | Rule | Example | Effect |
 |---|---|---|
-| `DEVICE:` | `DEVICE:200@domain.com` | Ignore a specific device |
+| `DEVICE:` | `DEVICE:200@domain.com` | Ignore a specific extension |
 | `DOMAIN:` | `DOMAIN:testdomain.com` | Ignore all devices on a domain |
 | `IP:` | `IP:192.168.1.100` | Ignore a specific source IP |
-| `UA:` | `UA:Mobile321` | Ignore an exact UA string |
-| `UA_PREFIX:` | `UA_PREFIX:Mobile/1.0` | Ignore any UA starting with prefix |
-| `UA_CHANGE:` | `UA_CHANGE:UA One->UA Two` | Ignore an exact UA-to-UA change |
+| `UA:` | `UA:Polycom/4.0.1` | Ignore an exact UA string |
+| `UA_PREFIX:` | `UA_PREFIX:Polycom/4` | Ignore any UA starting with prefix |
+| `UA_CHANGE:` | `UA_CHANGE:UA One->UA Two` | Ignore an exact UA-to-UA transition |
 | `UA_CHANGE_PREFIX:` | `UA_CHANGE_PREFIX:App/1.8->App/1.9` | Ignore version bumps within the same app |
+
+Suppressed devices still have their `device_ua` record updated — they simply never trigger alerts or change_log entries.
 
 ---
 
-## Alerts
+## Octet Ignore
 
-### 🔴 Change Alert
-All UA/IP changes detected in a single cron run are batched into **one** message per run, rather than one message per device.
+Set via `ignore_octet_count` in `[monitor]`. Useful when devices on a subnet roam between IPs within the same range and you do not want those IP-only changes to contribute to alert decisions.
 
-### 🟢 New Device Digest
-New devices are queued and sent as a single batched table on the configured digest schedule.
+| Setting | Behaviour |
+|---|---|
+| `0` | All IP changes are compared *(default)* |
+| `1` | Ignores last octet — `192.168.1.x` changes silenced |
+| `2` | Ignores last two octets — `192.168.x.x` changes silenced |
+| `3` | Ignores last three octets — `192.x.x.x` changes silenced |
+
+---
+
+## PagerDuty Service Setup
+
+Before running the installer you need an Integration Key from PagerDuty:
+
+1. Log in to PagerDuty and go to **Services** in the top navigation.
+2. Select an existing service to receive UA Monitor alerts, or create a new one (e.g. "VoIP Infrastructure").
+3. Open the **Integrations** tab and click **Add an integration**.
+4. Search for **Events API v2**, select it, and click **Add**.
+5. Expand the integration and copy the **Integration Key** (32-character alphanumeric string).
+6. Paste that key when the installer prompts for the PagerDuty routing key, or set `routing_key` in `[pagerduty]` in `ua_monitor.conf`.
+
+Alerts are sent to `https://events.pagerduty.com/v2/enqueue` using Python's standard `urllib` library — no additional packages beyond PyMySQL are required.
 
 ---
 
 ## Useful Commands
 
 ```bash
-# Seed or reseed the tracking database
+# Seed or reseed the tracking database (scans last 24 hours, no alerts)
 sudo python3 /opt/ua_monitor/check_ua.py --seed
+
+# Run once manually and check output
+sudo python3 /opt/ua_monitor/check_ua.py
+
+# Send today's new digest entries
+sudo python3 /opt/ua_monitor/digest.py
+
+# Send full change log digest
+sudo python3 /opt/ua_monitor/digest.py --full
 
 # Watch the log live
 tail -f /var/log/ua_monitor.log
@@ -281,13 +367,14 @@ mysql -u"ua_monitor" -p'yourpassword' -e "
     SELECT COUNT(*) AS devices, MIN(last_seen) AS oldest, MAX(last_seen) AS newest
     FROM ua_monitor.device_ua;"
 
-# Check new device queue
+# Inspect change log
 mysql -u"ua_monitor" -p'yourpassword' -e "
-    SELECT COUNT(*) AS queued FROM ua_monitor.new_device_queue;" ua_monitor
+    SELECT from_num, domain, detected_ua, hit_count, first_seen, last_seen
+    FROM ua_monitor.change_log
+    ORDER BY hit_count DESC;" ua_monitor
 
-# Check last digest sent
-mysql -u"ua_monitor" -p'yourpassword' -e "
-    SELECT MAX(sent_at) AS last_digest FROM ua_monitor.digest_log;" ua_monitor
+# Run weekly cleanup manually
+sudo python3 /opt/ua_monitor/cleanup.py
 ```
 
 ---
@@ -296,11 +383,12 @@ mysql -u"ua_monitor" -p'yourpassword' -e "
 
 | Prefix | Meaning |
 |---|---|
-| `NEW:` | First time this device has been seen |
+| `NEW:` | First time this device has been seen — recorded, no alert |
 | `SEED:` | Device recorded during a `--seed` run |
-| `CHANGE:` | UA or IP changed — alert sent |
-| `SILENT:` | Change detected but filtered by `ALERT_MODE` |
+| `CHANGE (auto):` | Change detected and alert sent — auto mode |
+| `CHANGE (ua_and_ip):` | Change detected and alert sent — ua_and_ip mode |
+| `DEDUP:` | Change detected but UA already in change_log — counter incremented, no alert |
+| `SILENT (auto):` | Change detected but filtered by alert mode logic |
 | `SUPPRESSED:` | Change matched a rule in `suppress.conf` |
 | `OCTET CHANGE IGNORED:` | IP changed within the ignored octet range |
-| `DIGEST:` | New device digest was sent |
 | `CLEANUP:` | Weekly stale device removal ran |
