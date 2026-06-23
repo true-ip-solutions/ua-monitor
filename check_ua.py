@@ -30,9 +30,14 @@ DB_HOST            = _get('database', 'db_host',       'localhost')
 LOG_FILE           = _get('monitor',  'log_file',      '/var/log/ua_monitor.log')
 SUPPRESS_CONF      = _get('monitor',  'suppress_conf', '/opt/ua_monitor/suppress.conf')
 LOOKBACK_MINUTES   = int(_get('monitor', 'lookback_minutes',   '6'))
-ALERT_MODE         = _get('monitor',  'alert_mode',         'ua_or_ip')
-NEW_DEVICE_DIGEST  = _get('monitor',  'new_device_digest',  'every_run')
+ALERT_MODE         = _get('monitor',  'alert_mode',         'auto')
 IGNORE_OCTET_COUNT = int(_get('monitor', 'ignore_octet_count', '0'))
+
+# Comma-separated UA prefixes treated as mobile/softphone (case-insensitive).
+# Everything else is treated as hardware. Unknown UAs default to hardware
+# treatment (stricter/safer).
+_raw_prefixes      = _get('alert_rules', 'mobile_ua_prefixes', '')
+MOBILE_UA_PREFIXES = [p.strip() for p in _raw_prefixes.split(',') if p.strip()]
 
 # -----------------------------------------------------------------------
 # Logging
@@ -119,18 +124,50 @@ def should_suppress(rules, from_num, domain, device_ip, old_ua, new_ua):
     return False
 
 # -----------------------------------------------------------------------
-# Alert mode and subnet helpers
+# UA classification and alert mode
 # -----------------------------------------------------------------------
 
-def should_alert(ip_changed, ua_changed):
-    if ALERT_MODE == 'ua_only':
-        return ua_changed
-    elif ALERT_MODE == 'ip_only':
-        return ip_changed
-    elif ALERT_MODE == 'ua_and_ip':
-        return ip_changed and ua_changed
-    else:  # ua_or_ip (default)
-        return ip_changed or ua_changed
+def is_mobile(ua):
+    """Returns True if the UA string matches a known mobile/softphone prefix."""
+    if not ua or ua == 'NONE':
+        return False
+    ua_lower = ua.lower()
+    return any(ua_lower.startswith(p.lower()) for p in MOBILE_UA_PREFIXES)
+
+def should_alert(ip_changed, ua_changed, old_ua, new_ua):
+    """
+    Determine whether a detected change should trigger a notification.
+
+    alert_mode = auto (recommended):
+      - Both hardware:      alert only when both UA and IP changed (ua_and_ip)
+      - Both mobile:        alert only when UA changed (ua_only)
+      - Cross-category:     always alert (hardware<->mobile transition)
+
+    alert_mode = ua_only | ip_only | ua_and_ip | ua_or_ip:
+      - Global override applied uniformly to all devices.
+    """
+    if ALERT_MODE != 'auto':
+        if ALERT_MODE == 'ua_only':
+            return ua_changed
+        elif ALERT_MODE == 'ip_only':
+            return ip_changed
+        elif ALERT_MODE == 'ua_and_ip':
+            return ip_changed and ua_changed
+        else:  # ua_or_ip
+            return ip_changed or ua_changed
+
+    old_mobile = is_mobile(old_ua)
+    new_mobile = is_mobile(new_ua)
+
+    if old_mobile != new_mobile:
+        return True              # cross-category: always alert
+    if old_mobile and new_mobile:
+        return ua_changed        # both mobile: ua_only
+    return ip_changed and ua_changed  # both hardware: ua_and_ip
+
+# -----------------------------------------------------------------------
+# Subnet helpers
+# -----------------------------------------------------------------------
 
 def same_subnet(ip1, ip2):
     if IGNORE_OCTET_COUNT == 0:
@@ -190,13 +227,8 @@ def get_changes(conn, lookback):
 # -----------------------------------------------------------------------
 
 def get_active_registrations_batch(conn, device_pairs):
-    """
-    Fetch active registrations for all changed devices in a single query.
-    Returns a dict keyed by (from_num, to_domain) with a list of reg rows.
-    """
     if not device_pairs:
         return {}
-
     placeholders = ', '.join(['(%s, %s)'] * len(device_pairs))
     query = f"""
         SELECT
@@ -214,11 +246,9 @@ def get_active_registrations_batch(conn, device_pairs):
         ORDER BY rs.from_num, rs.to_domain, last_seen DESC
     """
     params = [val for pair in device_pairs for val in pair]
-
     with conn.cursor() as cur:
         cur.execute(query, params)
         rows = cur.fetchall()
-
     result = {}
     for row in rows:
         key = (row['from_num'], row['to_domain'])
@@ -246,18 +276,6 @@ def upsert_devices_batch(conn, rows):
     with conn.cursor() as cur:
         cur.executemany(UPSERT_SQL, rows)
 
-def queue_new_devices_batch(conn, rows):
-    """rows: list of (from_num, domain, contact_ip, ua)"""
-    if not rows:
-        return
-    sql = """
-        INSERT INTO ua_monitor.new_device_queue
-            (from_num, domain, contact_ip, ua, detected_at)
-        VALUES (%s, %s, %s, %s, NOW())
-    """
-    with conn.cursor() as cur:
-        cur.executemany(sql, rows)
-
 def update_last_seen_bulk(conn, lookback):
     with conn.cursor() as cur:
         cur.execute("""
@@ -274,65 +292,46 @@ def update_last_seen_bulk(conn, lookback):
         """, (lookback,))
 
 # -----------------------------------------------------------------------
-# SQL — digest
+# SQL — change log (deduplication)
 # -----------------------------------------------------------------------
 
-def should_send_digest(conn):
+def in_change_log(conn, from_num, domain, detected_ua):
+    """Returns True if this UA has already been notified for this extension."""
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT COALESCE(MAX(sent_at), '2000-01-01') AS last_digest
-            FROM ua_monitor.digest_log
-        """)
-        last_digest = cur.fetchone()['last_digest']
+            SELECT id FROM ua_monitor.change_log
+            WHERE from_num = %s AND domain = %s AND detected_ua = %s
+        """, (from_num, domain, detected_ua))
+        return cur.fetchone() is not None
 
-    if NEW_DEVICE_DIGEST == 'every_run':
-        return True
-
-    intervals = {'30min': '30 MINUTE', 'hourly': '1 HOUR', 'daily': '1 DAY'}
-    interval = intervals.get(NEW_DEVICE_DIGEST, '1 DAY')
-
-    with conn.cursor() as cur:
-        cur.execute(
-            f"SELECT NOW() > DATE_ADD(%s, INTERVAL {interval}) AS due",
-            (last_digest,)
-        )
-        return bool(cur.fetchone()['due'])
-
-def flush_new_device_digest(conn):
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT from_num, domain, contact_ip, ua, detected_at
-            FROM ua_monitor.new_device_queue
-            ORDER BY detected_at ASC
-        """)
-        queued = cur.fetchall()
-
-    if not queued:
+def upsert_change_log(conn, entries):
+    """
+    entries: list of (from_num, domain, old_ua, detected_ua, detected_ip)
+    Inserts new entries or increments hit_count on duplicates.
+    """
+    if not entries:
         return
-
-    count = len(queued)
-    success = send_notification('new_device_digest', count, {
-        'devices': queued,
-        'detected_at': datetime.now().strftime('%c'),
-    })
-
-    if success:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM ua_monitor.new_device_queue")
-            cur.execute("INSERT INTO ua_monitor.digest_log (sent_at) VALUES (NOW())")
-        log(f"DIGEST: Sent new device digest — {count} device(s)")
-    else:
-        log("DIGEST: Notification failed — queue preserved for next run")
+    sql = """
+        INSERT INTO ua_monitor.change_log
+            (from_num, domain, old_ua, detected_ua, detected_ip,
+             first_seen, last_seen, hit_count)
+        VALUES (%s, %s, %s, %s, %s, NOW(), NOW(), 1)
+        ON DUPLICATE KEY UPDATE
+            last_seen = NOW(),
+            hit_count = hit_count + 1
+    """
+    with conn.cursor() as cur:
+        cur.executemany(sql, entries)
 
 # -----------------------------------------------------------------------
 # Notification
 # -----------------------------------------------------------------------
 
-def send_notification(event_type, count, data):
+def send_notification(count, data):
     try:
         sys.path.insert(0, '/opt/ua_monitor')
         import notify
-        return notify.send(event_type, count, data)
+        return notify.send(count, data)
     except Exception as e:
         log(f"NOTIFY ERROR: {e}")
         return False
@@ -356,8 +355,6 @@ def main():
 
         if not changes:
             print("No changes detected.")
-            if not seed_mode and should_send_digest(conn):
-                flush_new_device_digest(conn)
             return
 
         # ---------------------------------------------------------------
@@ -382,13 +379,9 @@ def main():
         new_devices     = [r for r in changes if r['change_type'] == 'new']
         changed_devices = [r for r in changes if r['change_type'] == 'changed']
 
-        # New devices — upsert and queue for digest
+        # New devices — upsert only, no notification
         if new_devices:
             upsert_devices_batch(conn, [
-                (r['from_num'], r['to_domain'], r['device_ip'], r['current_ua'])
-                for r in new_devices
-            ])
-            queue_new_devices_batch(conn, [
                 (r['from_num'], r['to_domain'], r['device_ip'], r['current_ua'])
                 for r in new_devices
             ])
@@ -399,8 +392,9 @@ def main():
         device_pairs = [(r['from_num'], r['to_domain']) for r in changed_devices]
         active_regs_map = get_active_registrations_batch(conn, device_pairs)
 
-        alert_list   = []
-        all_updates  = []  # every changed device gets an upsert regardless of outcome
+        alert_list        = []
+        all_upserts       = []
+        change_log_entries = []
 
         for r in changed_devices:
             from_num   = r['from_num']
@@ -420,43 +414,54 @@ def main():
                 else:
                     ip_changed = True
 
-            all_updates.append((from_num, domain, device_ip, current_ua))
+            all_upserts.append((from_num, domain, device_ip, current_ua))
 
             if should_suppress(suppress_rules, from_num, domain, device_ip, known_ua, current_ua):
-                pass  # update still queued above; no alert
-            elif should_alert(ip_changed, ua_changed):
+                pass  # upsert still queued; no alert
+            elif should_alert(ip_changed, ua_changed, known_ua, current_ua):
                 what = []
                 if ip_changed:
                     what.append(f"IP: {known_ip} -> {device_ip}")
                 if ua_changed:
                     what.append(f"UA: {known_ua} -> {current_ua}")
-                log(f"CHANGE ({ALERT_MODE}): {from_num}@{domain} | {' '.join(what)}")
+                log(f"CHANGE ({ALERT_MODE}): {from_num}@{domain} | {' | '.join(what)}")
 
                 active_regs = active_regs_map.get((from_num, domain), [])
-                alert_list.append({
-                    'device':      f"{from_num}@{domain}",
-                    'old_ip':      known_ip,
-                    'new_ip':      device_ip,
-                    'old_ua':      known_ua,
-                    'new_ua':      current_ua,
-                    'active_regs': active_regs,
-                })
+
+                already_notified = in_change_log(conn, from_num, domain, current_ua)
+
+                if not already_notified:
+                    alert_list.append({
+                        'device':      f"{from_num}@{domain}",
+                        'old_ip':      known_ip,
+                        'new_ip':      device_ip,
+                        'old_ua':      known_ua,
+                        'new_ua':      current_ua,
+                        'active_regs': active_regs,
+                    })
+                    # Record both directions so oscillation reverse is also silenced
+                    change_log_entries.append(
+                        (from_num, domain, known_ua,   current_ua, device_ip))
+                    change_log_entries.append(
+                        (from_num, domain, current_ua, known_ua,   known_ip))
+                else:
+                    # Already notified — increment counter only
+                    change_log_entries.append(
+                        (from_num, domain, known_ua, current_ua, device_ip))
+                    log(f"DEDUP: {from_num}@{domain} | {current_ua} (already in change log)")
             else:
                 log(f"SILENT ({ALERT_MODE}): {from_num}@{domain} @ {device_ip} | UA: {current_ua}")
 
-        # Batch all changed-device upserts in one statement
-        upsert_devices_batch(conn, all_updates)
+        # Batch writes
+        upsert_devices_batch(conn, all_upserts)
+        upsert_change_log(conn, change_log_entries)
 
-        # Send all change alerts as a single notification
+        # Send all new alerts as a single notification
         if alert_list:
-            send_notification('changes', len(alert_list), {
+            send_notification(len(alert_list), {
                 'changes':     alert_list,
                 'detected_at': datetime.now().strftime('%c'),
             })
-
-        # New device digest
-        if should_send_digest(conn):
-            flush_new_device_digest(conn)
 
         # Bulk last-seen refresh for all currently registered devices
         update_last_seen_bulk(conn, lookback)

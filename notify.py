@@ -3,7 +3,7 @@
 #
 # Notification router and provider implementations.
 # Called as a module from check_ua.py — not run directly.
-# Set NOTIFY_PROVIDER below; credentials are filled in by install.sh.
+# Provider and credentials are read from /opt/ua_monitor/ua_monitor.conf.
 
 import smtplib
 import json
@@ -34,8 +34,7 @@ TEAMS_WEBHOOK          = _get('teams',     'webhook')
 
 PD_ROUTING_KEY         = _get('pagerduty', 'routing_key')
 PD_SOURCE              = _get('pagerduty', 'source')
-PD_SEVERITY_CHANGE     = _get('pagerduty', 'severity_change',     'warning')
-PD_SEVERITY_NEW_DEVICE = _get('pagerduty', 'severity_new_device', 'info')
+PD_SEVERITY_CHANGE     = _get('pagerduty', 'severity_change', 'warning')
 PD_API_URL             = "https://events.pagerduty.com/v2/enqueue"
 
 # -----------------------------------------------------------------------
@@ -92,24 +91,6 @@ def _slack_changes(count, data):
     }
     return _http_post(SLACK_WEBHOOK, payload)
 
-def _slack_digest(count, data):
-    detected_at = data.get('detected_at', datetime.now().strftime('%c'))
-    header = f"{'Device':<22}| {'IP':<15} | User Agent\n"
-    header += f"{'-'*22}|{'-'*17}|------------------\n"
-    rows = ""
-    for d in data.get('devices', []):
-        device = f"{d['from_num']}@{d['domain']}"
-        rows += f"{device[:22]:<22}| {d.get('contact_ip','')[:15]:<15} | {d.get('ua','')[:40]}\n"
-
-    payload = {
-        "text": f":new: *{count} New Device Registration(s)*",
-        "attachments": [{
-            "color": "#2eb886",
-            "footer": detected_at,
-            "text": f"```{header}{rows}```",
-        }]
-    }
-    return _http_post(SLACK_WEBHOOK, payload)
 
 # -----------------------------------------------------------------------
 # Email
@@ -138,25 +119,6 @@ def _email_changes(count, data):
     except Exception:
         return False
 
-def _email_digest(count, data):
-    detected_at = data.get('detected_at', datetime.now().strftime('%c'))
-    body = f"{count} new device(s) at {detected_at}\n\n"
-    body += f"{'Device':<22}| {'IP':<15} | User Agent\n"
-    body += f"{'':->22}|{'':-^17}|------------------\n"
-    for d in data.get('devices', []):
-        device = f"{d['from_num']}@{d['domain']}"
-        body += f"{device[:22]:<22}| {d.get('contact_ip','')[:15]:<15} | {d.get('ua','')[:40]}\n"
-
-    msg = MIMEText(body)
-    msg['Subject'] = f"[UA Monitor] {count} New Device Registration(s)"
-    msg['From']    = EMAIL_FROM
-    msg['To']      = EMAIL_TO
-    try:
-        with smtplib.SMTP('localhost') as s:
-            s.sendmail(EMAIL_FROM, [EMAIL_TO], msg.as_string())
-        return True
-    except Exception:
-        return False
 
 # -----------------------------------------------------------------------
 # Microsoft Teams
@@ -184,27 +146,6 @@ def _teams_changes(count, data):
     }
     return _http_post(TEAMS_WEBHOOK, payload)
 
-def _teams_digest(count, data):
-    detected_at = data.get('detected_at', datetime.now().strftime('%c'))
-    header = f"{'Device':<22}| {'IP':<15} | User Agent\n"
-    header += f"{'-'*22}|{'-'*17}|------------------\n"
-    rows = ""
-    for d in data.get('devices', []):
-        device = f"{d['from_num']}@{d['domain']}"
-        rows += f"{device[:22]:<22}| {d.get('contact_ip','')[:15]:<15} | {d.get('ua','')[:40]}\n"
-
-    payload = {
-        "@type":       "MessageCard",
-        "@context":    "http://schema.org/extensions",
-        "themeColor":  "2eb886",
-        "summary":     f"{count} New Device Registration(s)",
-        "sections": [{
-            "activityTitle":    f"\U0001f195 {count} New Device Registration(s)",
-            "activitySubtitle": detected_at,
-            "text":             f"```\n{header}{rows}```",
-        }]
-    }
-    return _http_post(TEAMS_WEBHOOK, payload)
 
 # -----------------------------------------------------------------------
 # PagerDuty
@@ -242,58 +183,28 @@ def _pd_changes(count, data):
     }
     return _http_post(PD_API_URL, payload, expect_status=202)
 
-def _pd_digest(count, data):
-    detected_at = data.get('detected_at', datetime.now().strftime('%c'))
-    lines = []
-    for d in data.get('devices', []):
-        device = f"{d['from_num']}@{d['domain']}"
-        lines.append(f"{device:<22} | {d.get('contact_ip',''):<15} | {d.get('ua','')}")
-
-    payload = {
-        "routing_key":  PD_ROUTING_KEY,
-        "event_action": "trigger",
-        "payload": {
-            "summary":  f"UA Monitor: {count} New Device Registration(s)",
-            "source":   _pd_source(),
-            "severity": PD_SEVERITY_NEW_DEVICE,
-            "custom_details": {
-                "detected_at": detected_at,
-                "devices":     "\n".join(lines),
-            }
-        }
-    }
-    return _http_post(PD_API_URL, payload, expect_status=202)
 
 # -----------------------------------------------------------------------
 # Public interface
 # -----------------------------------------------------------------------
 
-def send(event_type, count, data):
+def send(count, data):
     """
     Called by check_ua.py.
-    event_type: 'changes' | 'new_device_digest'
-    count:      int
-    data:       dict with event-specific fields
+    count: int — number of changes
+    data:  dict with 'changes' list and 'detected_at' string
     Returns True on success, False on failure.
     """
-    providers = {
-        'slack':      (_slack_changes,  _slack_digest),
-        'email':      (_email_changes,  _email_digest),
-        'teams':      (_teams_changes,  _teams_digest),
-        'pagerduty':  (_pd_changes,     _pd_digest),
+    handlers = {
+        'slack':     _slack_changes,
+        'email':     _email_changes,
+        'teams':     _teams_changes,
+        'pagerduty': _pd_changes,
     }
 
-    pair = providers.get(NOTIFY_PROVIDER)
-    if not pair:
+    fn = handlers.get(NOTIFY_PROVIDER)
+    if not fn:
         print(f"Unknown NOTIFY_PROVIDER: {NOTIFY_PROVIDER}")
         return False
 
-    fn_changes, fn_digest = pair
-
-    if event_type == 'changes':
-        return fn_changes(count, data)
-    elif event_type == 'new_device_digest':
-        return fn_digest(count, data)
-    else:
-        print(f"Unknown event_type: {event_type}")
-        return False
+    return fn(count, data)

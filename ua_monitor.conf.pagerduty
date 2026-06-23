@@ -1,0 +1,29 @@
+[database]
+db_user = ua_monitor
+db_pass = REPLACE_WITH_DB_PASSWORD
+db_host = localhost
+
+[monitor]
+log_file = /var/log/ua_monitor.log
+suppress_conf = /opt/ua_monitor/suppress.conf
+lookback_minutes = 6
+alert_mode = auto
+ignore_octet_count = 2
+retention_days = 90
+
+[alert_rules]
+mobile_ua_prefixes = snapmobile,zoiper,groundwire,bria,linphone
+
+[notify]
+provider = pagerduty
+
+[pagerduty]
+routing_key = REPLACE_WITH_ROUTING_KEY
+source =
+severity_change = warning
+
+[digest]
+to = REPLACE_WITH_DIGEST_EMAIL
+from = ua-monitor@yourdomain.com
+subject = [UA Monitor] Daily Change Log Digest
+smtp_host = localhost

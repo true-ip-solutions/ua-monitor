@@ -66,13 +66,15 @@ def main():
 
         with conn.cursor() as cur:
             cur.execute("""
-                DELETE FROM ua_monitor.digest_log
-                WHERE sent_at < NOW() - INTERVAL %s DAY
-            """, (RETENTION_DAYS,))
+                DELETE FROM ua_monitor.change_log
+                WHERE last_seen < NOW() - INTERVAL 30 DAY
+            """)
+            aged = cur.rowcount
 
-        msg = f"CLEANUP: Removed {deleted} stale devices (not seen in {RETENTION_DAYS} days)"
+        msg = f"CLEANUP: Removed {deleted} stale devices (not seen in {RETENTION_DAYS} days), {aged} aged change_log entries"
         log(msg)
         print(msg)
+        log(f"CLEANUP: change_log aging complete ({aged} entries removed)")
 
     finally:
         conn.close()
