@@ -12,10 +12,17 @@ db_host = localhost
 log_file = /var/log/ua_monitor.log
 suppress_conf = /opt/ua_monitor/suppress.conf
 lookback_minutes = 6
-alert_mode = ua_or_ip
-new_device_digest = every_run
+# alert_mode: auto | ua_only | ip_only | ua_and_ip | ua_or_ip
+# auto = per-device classification (recommended)
+alert_mode = auto
 ignore_octet_count = 0
 retention_days = 90
+
+[alert_rules]
+# Comma-separated UA string prefixes treated as mobile/softphone.
+# Case-insensitive prefix match. Everything else is treated as hardware.
+# Unknown UAs default to hardware (stricter/safer).
+mobile_ua_prefixes = snapmobile,zoiper,groundwire,bria,linphone
 
 [notify]
 # Choose one: slack | email | teams | pagerduty
@@ -37,4 +44,9 @@ webhook = https://hooks.slack.com/services/XXXX/XXXX/XXXX
 # routing_key = your-32-char-integration-key
 # source =
 # severity_change = warning
-# severity_new_device = info
+
+[digest]
+to = admin@yourdomain.com
+from = ua-monitor@yourdomain.com
+subject = [UA Monitor] Daily Change Log Digest
+smtp_host = localhost

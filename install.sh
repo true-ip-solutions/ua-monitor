@@ -49,39 +49,39 @@ ok "Prerequisites OK"
 # -----------------------------------------------------------------------
 
 ask "MySQL root password (for one-time DB setup):"
-read -rsp "  > " MYSQL_ROOT_PASS
+read -rsp "  > " MYSQL_ROOT_PASS < /dev/tty
 echo ""
 
 ask "UA Monitor DB password (will be set for the ua_monitor MySQL user):"
-read -rsp "  > " DB_PASS
+read -rsp "  > " DB_PASS < /dev/tty
 echo ""
 
 ask "Notification provider (slack / email / teams / pagerduty) [slack]:"
-read -r NOTIFY_PROVIDER
+read -r NOTIFY_PROVIDER < /dev/tty
 NOTIFY_PROVIDER="${NOTIFY_PROVIDER:-slack}"
 
 case "$NOTIFY_PROVIDER" in
     slack)
         ask "Slack webhook URL:"
-        read -r SLACK_WEBHOOK
+        read -r SLACK_WEBHOOK < /dev/tty
         [[ "$SLACK_WEBHOOK" == https://hooks.slack.com/* ]] || warn "Webhook URL looks unusual — double check it"
         ;;
     email)
         ask "Email address to send alerts to:"
-        read -r EMAIL_TO
+        read -r EMAIL_TO < /dev/tty
         ask "Email address to send alerts from:"
-        read -r EMAIL_FROM
+        read -r EMAIL_FROM < /dev/tty
         ;;
     teams)
         ask "Microsoft Teams webhook URL:"
-        read -r TEAMS_WEBHOOK
+        read -r TEAMS_WEBHOOK < /dev/tty
         ;;
     pagerduty)
         ask "PagerDuty Events API v2 routing key (Integration Key from your PagerDuty service):"
-        read -r PD_ROUTING_KEY
+        read -r PD_ROUTING_KEY < /dev/tty
         [ -z "$PD_ROUTING_KEY" ] && err "Routing key cannot be empty"
         ask "Alert severity for device changes (critical / error / warning / info) [warning]:"
-        read -r PD_SEVERITY_CHANGE
+        read -r PD_SEVERITY_CHANGE < /dev/tty
         PD_SEVERITY_CHANGE="${PD_SEVERITY_CHANGE:-warning}"
         case "$PD_SEVERITY_CHANGE" in
             critical|error|warning|info) ;;
@@ -93,17 +93,26 @@ case "$NOTIFY_PROVIDER" in
         ;;
 esac
 
-ask "Alert mode (ua_only / ip_only / ua_and_ip / ua_or_ip) [ua_or_ip]:"
-read -r ALERT_MODE
-ALERT_MODE="${ALERT_MODE:-ua_or_ip}"
-
-ask "New device digest frequency (every_run / 30min / hourly / daily) [every_run]:"
-read -r NEW_DEVICE_DIGEST
-NEW_DEVICE_DIGEST="${NEW_DEVICE_DIGEST:-every_run}"
+ask "Alert mode (auto / ua_only / ip_only / ua_and_ip / ua_or_ip) [auto]:"
+read -r ALERT_MODE < /dev/tty
+ALERT_MODE="${ALERT_MODE:-auto}"
 
 ask "Ignore IP octet count (0-3, 0 = disabled) [0]:"
-read -r IGNORE_OCTET_COUNT
+read -r IGNORE_OCTET_COUNT < /dev/tty
 IGNORE_OCTET_COUNT="${IGNORE_OCTET_COUNT:-0}"
+
+ask "Mobile UA prefixes for auto mode (comma-separated, e.g. snapmobile,zoiper,groundwire) []:"
+read -r MOBILE_UA_PREFIXES < /dev/tty
+
+ask "Digest recipient email address:"
+read -r DIGEST_TO < /dev/tty
+
+ask "Digest sender email address:"
+read -r DIGEST_FROM < /dev/tty
+
+ask "Digest email subject [[UA Monitor] Daily Change Log Digest]:"
+read -r DIGEST_SUBJECT < /dev/tty
+DIGEST_SUBJECT="${DIGEST_SUBJECT:-[UA Monitor] Daily Change Log Digest}"
 
 echo ""
 echo "========================================"
@@ -116,7 +125,7 @@ echo "========================================"
 
 mkdir -p "$INSTALL_DIR"
 
-FILES=(check_ua.py notify.py cleanup.py suppress.conf)
+FILES=(check_ua.py notify.py cleanup.py digest.py suppress.conf)
 
 for f in "${FILES[@]}"; do
     curl -fsSL "${GITHUB_REPO}/${f}" -o "${INSTALL_DIR}/${f}" \
@@ -151,9 +160,11 @@ log_file = ${LOG}
 suppress_conf = ${INSTALL_DIR}/suppress.conf
 lookback_minutes = 6
 alert_mode = ${ALERT_MODE}
-new_device_digest = ${NEW_DEVICE_DIGEST}
 ignore_octet_count = ${IGNORE_OCTET_COUNT}
 retention_days = 90
+
+[alert_rules]
+mobile_ua_prefixes = ${MOBILE_UA_PREFIXES}
 
 [notify]
 provider = ${NOTIFY_PROVIDER}
@@ -189,10 +200,18 @@ EOF
 routing_key = ${PD_ROUTING_KEY}
 source =
 severity_change = ${PD_SEVERITY_CHANGE}
-severity_new_device = info
 EOF
             ;;
     esac
+
+    cat >> "${INSTALL_DIR}/ua_monitor.conf" << EOF
+
+[digest]
+to = ${DIGEST_TO}
+from = ${DIGEST_FROM}
+subject = ${DIGEST_SUBJECT}
+smtp_host = localhost
+EOF
 
     ok "Configuration written"
 fi
@@ -204,6 +223,7 @@ fi
 chmod 700 "${INSTALL_DIR}/check_ua.py"
 chmod 700 "${INSTALL_DIR}/notify.py"
 chmod 700 "${INSTALL_DIR}/cleanup.py"
+chmod 700 "${INSTALL_DIR}/digest.py"
 chmod 600 "${INSTALL_DIR}/suppress.conf"
 chmod 600 "${INSTALL_DIR}/ua_monitor.conf"
 
@@ -244,7 +264,7 @@ ok "Seed complete"
 
 echo ""
 ask "Install cron jobs? (y/n) [y]:"
-read -r INSTALL_CRON
+read -r INSTALL_CRON < /dev/tty
 INSTALL_CRON="${INSTALL_CRON:-y}"
 
 if [[ "$INSTALL_CRON" =~ ^[Yy]$ ]]; then
@@ -252,8 +272,20 @@ if [[ "$INSTALL_CRON" =~ ^[Yy]$ ]]; then
     crontab -l 2>/dev/null | grep -q "ua_monitor" && warn "Cron entries already exist — skipping" || {
         (crontab -l 2>/dev/null; echo "*/5 * * * * python3 ${INSTALL_DIR}/check_ua.py") | crontab -
         (crontab -l 2>/dev/null; echo "0 3 * * 0 python3 ${INSTALL_DIR}/cleanup.py") | crontab -
-        ok "Cron jobs installed"
+        ok "Monitor and cleanup cron jobs installed"
     }
+
+    ask "Install daily digest cron job? (y/n) [y]:"
+    read -r INSTALL_DIGEST_CRON < /dev/tty
+    INSTALL_DIGEST_CRON="${INSTALL_DIGEST_CRON:-y}"
+
+    if [[ "$INSTALL_DIGEST_CRON" =~ ^[Yy]$ ]]; then
+        ask "Digest cron schedule (cron expression) [0 7 * * *] (7am daily):"
+        read -r DIGEST_CRON < /dev/tty
+        DIGEST_CRON="${DIGEST_CRON:-0 7 * * *}"
+        (crontab -l 2>/dev/null; echo "${DIGEST_CRON} python3 ${INSTALL_DIR}/digest.py") | crontab -
+        ok "Digest cron job installed ($DIGEST_CRON)"
+    fi
 fi
 
 # -----------------------------------------------------------------------
@@ -269,9 +301,10 @@ echo "  Install dir:  $INSTALL_DIR"
 echo "  Log file:     $LOG"
 echo "  Provider:     $NOTIFY_PROVIDER"
 echo "  Alert mode:   $ALERT_MODE"
-echo "  Digest:       $NEW_DEVICE_DIGEST"
+echo "  Digest to:    $DIGEST_TO"
 echo ""
 echo "  Useful commands:"
 echo "    tail -f $LOG"
 echo "    python3 ${INSTALL_DIR}/check_ua.py"
+echo "    python3 ${INSTALL_DIR}/digest.py   (manual digest trigger)"
 echo ""
