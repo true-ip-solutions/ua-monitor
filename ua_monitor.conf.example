@@ -1,0 +1,40 @@
+# UA Monitor Configuration
+# Copy this file to /opt/ua_monitor/ua_monitor.conf and fill in your values.
+# Permissions should be 600 (sudo chmod 600 /opt/ua_monitor/ua_monitor.conf).
+# Changes take effect on the next cron run — no restart needed.
+
+[database]
+db_user = ua_monitor
+db_pass = yourpassword
+db_host = localhost
+
+[monitor]
+log_file = /var/log/ua_monitor.log
+suppress_conf = /opt/ua_monitor/suppress.conf
+lookback_minutes = 6
+alert_mode = ua_or_ip
+new_device_digest = every_run
+ignore_octet_count = 0
+retention_days = 90
+
+[notify]
+# Choose one: slack | email | teams | pagerduty
+provider = slack
+
+# Add only the section that matches your provider.
+
+[slack]
+webhook = https://hooks.slack.com/services/XXXX/XXXX/XXXX
+
+# [email]
+# to = admin@yourdomain.com
+# from = ua-monitor@yourdomain.com
+
+# [teams]
+# webhook = https://outlook.office.com/webhook/XXXX
+
+# [pagerduty]
+# routing_key = your-32-char-integration-key
+# source =
+# severity_change = warning
+# severity_new_device = info
