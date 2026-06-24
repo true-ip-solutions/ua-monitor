@@ -24,6 +24,13 @@ retention_days = 90
 # Unknown UAs default to hardware (stricter/safer).
 mobile_ua_prefixes = snapmobile,zoiper,groundwire,bria,linphone
 
+# Hours of inactivity before a change_log entry is considered stale and a
+# repeat detection for that UA fires a fresh alert. Covers the case where
+# an extension is rekeyed after a breach but the same UA reappears later
+# via a second compromise. Active flapping updates last_seen every 5 minutes
+# so a 2-hour threshold won't generate false re-alerts during normal oscillation.
+change_log_staleness_hours = 2
+
 [notify]
 # Choose one: slack | email | teams | pagerduty
 provider = slack

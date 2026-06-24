@@ -39,6 +39,11 @@ IGNORE_OCTET_COUNT = int(_get('monitor', 'ignore_octet_count', '0'))
 _raw_prefixes      = _get('alert_rules', 'mobile_ua_prefixes', '')
 MOBILE_UA_PREFIXES = [p.strip() for p in _raw_prefixes.split(',') if p.strip()]
 
+# Hours of inactivity before a change_log entry is considered stale and a
+# repeat detection for that UA re-triggers an alert. Covers the case where
+# an extension is rekeyed after a breach but the same UA is later used again.
+CHANGE_LOG_STALENESS_HOURS = int(_get('alert_rules', 'change_log_staleness_hours', '2'))
+
 # -----------------------------------------------------------------------
 # Logging
 # -----------------------------------------------------------------------
@@ -296,13 +301,41 @@ def update_last_seen_bulk(conn, lookback):
 # -----------------------------------------------------------------------
 
 def in_change_log(conn, from_num, domain, detected_ua):
-    """Returns True if this UA has already been notified for this extension."""
+    """
+    Returns (notified, stale):
+      (True,  False) — fresh entry exists; suppress alert, increment counter
+      (False, False) — no entry; fire alert
+      (False, True)  — entry exists but is stale; delete and re-arm, fire alert
+
+    An entry is stale when last_seen is older than CHANGE_LOG_STALENESS_HOURS.
+    This catches the case where an extension is rekeyed after a breach and the
+    same UA later reappears via a second compromise.
+    """
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT id FROM ua_monitor.change_log
+            SELECT last_seen FROM ua_monitor.change_log
             WHERE from_num = %s AND domain = %s AND detected_ua = %s
         """, (from_num, domain, detected_ua))
-        return cur.fetchone() is not None
+        row = cur.fetchone()
+    if not row:
+        return False, False
+    age_seconds = (datetime.now() - row['last_seen']).total_seconds()
+    stale = age_seconds > CHANGE_LOG_STALENESS_HOURS * 3600
+    return not stale, stale
+
+def delete_stale_change_log(conn, entries):
+    """
+    Delete specific change_log rows by (from_num, domain, detected_ua).
+    Called before upsert_change_log so that stale entries are replaced with
+    fresh rows (hit_count=1, first_seen=NOW()) rather than incremented.
+    """
+    if not entries:
+        return
+    with conn.cursor() as cur:
+        cur.executemany("""
+            DELETE FROM ua_monitor.change_log
+            WHERE from_num = %s AND domain = %s AND detected_ua = %s
+        """, entries)
 
 def upsert_change_log(conn, entries):
     """
@@ -392,9 +425,10 @@ def main():
         device_pairs = [(r['from_num'], r['to_domain']) for r in changed_devices]
         active_regs_map = get_active_registrations_batch(conn, device_pairs)
 
-        alert_list        = []
-        all_upserts       = []
+        alert_list         = []
+        all_upserts        = []
         change_log_entries = []
+        stale_to_delete    = []
 
         for r in changed_devices:
             from_num   = r['from_num']
@@ -428,7 +462,7 @@ def main():
 
                 active_regs = active_regs_map.get((from_num, domain), [])
 
-                already_notified = in_change_log(conn, from_num, domain, current_ua)
+                already_notified, is_stale = in_change_log(conn, from_num, domain, current_ua)
 
                 if not already_notified:
                     alert_list.append({
@@ -444,6 +478,13 @@ def main():
                         (from_num, domain, known_ua,   current_ua, device_ip))
                     change_log_entries.append(
                         (from_num, domain, current_ua, known_ua,   known_ip))
+                    if is_stale:
+                        # Stale entry must be deleted before upsert so it is
+                        # recreated fresh (hit_count=1, first_seen=NOW()) rather
+                        # than incremented from the old incident's counts.
+                        stale_to_delete.append((from_num, domain, current_ua))
+                        log(f"STALE REARM: {from_num}@{domain} | {current_ua} "
+                            f"(change_log entry stale >{CHANGE_LOG_STALENESS_HOURS}h, re-alerting)")
                 else:
                     # Already notified — increment counter only
                     change_log_entries.append(
@@ -452,7 +493,8 @@ def main():
             else:
                 log(f"SILENT ({ALERT_MODE}): {from_num}@{domain} @ {device_ip} | UA: {current_ua}")
 
-        # Batch writes
+        # Batch writes — stale deletes must precede upserts
+        delete_stale_change_log(conn, stale_to_delete)
         upsert_devices_batch(conn, all_upserts)
         upsert_change_log(conn, change_log_entries)
 

@@ -183,11 +183,13 @@ All settings live in `/opt/ua_monitor/ua_monitor.conf`. Changes take effect on t
 | Key | Default | Description |
 |---|---|---|
 | `mobile_ua_prefixes` | *(empty)* | Comma-separated UA prefixes treated as mobile/softphone. Case-insensitive prefix match. Everything else is treated as hardware. |
+| `change_log_staleness_hours` | `2` | Hours of inactivity before a change_log entry is considered stale and the next detection of that UA re-triggers an alert. See Alert Deduplication below. |
 
 Example:
 ```ini
 [alert_rules]
 mobile_ua_prefixes = snapmobile,zoiper,groundwire,bria,linphone,ringotel
+change_log_staleness_hours = 2
 ```
 
 ### [notify]
@@ -270,6 +272,8 @@ When an alert fires, both the old and new UA strings are written to a `change_lo
 
 Writing both directions (old → new and new → old) on first alert prevents oscillation — if a device flips back to its previous UA, that is also already in the log and will not re-alert.
 
+**Staleness re-arming:** If a UA has not been seen for longer than `change_log_staleness_hours` (default: 2 hours), its change_log entry is treated as stale and the next detection fires a fresh alert. This covers the case where an extension is rekeyed after a breach — active flapping updates `last_seen` every 5 minutes, so a rekeyed extension's entries quickly become stale. When a stale entry is re-armed, the old row is deleted and recreated fresh so `first_seen` and `hit_count` reflect the new incident rather than accumulating from the previous one.
+
 Change_log entries age out automatically after 30 days of inactivity (no new hits). Once aged out, the UA is treated as unknown again and will re-alert if it reappears.
 
 ---
@@ -292,9 +296,14 @@ python3 /opt/ua_monitor/digest.py --full
 
 The digest always sends, even if there are no new entries, so you have a daily confirmation that the system is running.
 
-Row highlighting in the digest table:
-- **Yellow** — extension has 5 or more hits (recurring change, likely misconfiguration)
-- **Amber** — extension has 10 or more hits (persistent issue, prioritize for support call)
+**Digest layout:** The email is split into two sections:
+
+- **True UA changes** — extensions where the UA changed in one direction only, or underwent multiple distinct transitions (A→B→C). Each change is listed as its own row. These are the most immediately actionable items.
+- **Flapping devices** — extensions oscillating between exactly two UAs (A↔B and B↔A). Flap pairs are collapsed into a single row to reduce noise. The combined hit count (both directions) is shown, and both detected IPs are displayed when they differ — diverging IPs on a flap row are a meaningful signal worth investigating. Column headers read "UA (A)" and "UA (B)" instead of "Previous UA" / "Detected UA" to reflect that direction is not meaningful for flaps.
+
+Row highlighting applies to both sections based on hit count:
+- **Yellow** — 5–9 hits (recurring change, likely misconfiguration or active oscillation)
+- **Red** — 10 or more hits (persistent issue; prioritize for a support call)
 
 ---
 
@@ -388,6 +397,7 @@ sudo python3 /opt/ua_monitor/cleanup.py
 | `CHANGE (auto):` | Change detected and alert sent — auto mode |
 | `CHANGE (ua_and_ip):` | Change detected and alert sent — ua_and_ip mode |
 | `DEDUP:` | Change detected but UA already in change_log — counter incremented, no alert |
+| `STALE REARM:` | UA found in change_log but entry is stale (last_seen > staleness threshold) — entry deleted, fresh alert fired |
 | `SILENT (auto):` | Change detected but filtered by alert mode logic |
 | `SUPPRESSED:` | Change matched a rule in `suppress.conf` |
 | `OCTET CHANGE IGNORED:` | IP changed within the ignored octet range |

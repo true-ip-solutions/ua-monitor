@@ -13,6 +13,7 @@ retention_days = 90
 
 [alert_rules]
 mobile_ua_prefixes = snapmobile,zoiper,groundwire,bria,linphone
+change_log_staleness_hours = 2
 
 [notify]
 provider = pagerduty

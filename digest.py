@@ -39,6 +39,8 @@ DIGEST_FROM    = _get('digest', 'from')
 DIGEST_SUBJECT = _get('digest', 'subject', '[UA Monitor] Daily Change Log Digest')
 DIGEST_SMTP    = _get('digest', 'smtp_host', 'localhost')
 
+CHANGE_LOG_STALENESS_HOURS = int(_get('alert_rules', 'change_log_staleness_hours', '2'))
+
 TIMESTAMP_FILE = Path('/opt/ua_monitor/last_digest.ts')
 
 # -----------------------------------------------------------------------
@@ -99,64 +101,162 @@ def fetch_change_log(conn, since=None):
         return cur.fetchall()
 
 # -----------------------------------------------------------------------
+# Flap detection
+# -----------------------------------------------------------------------
+
+def classify_rows(rows):
+    """
+    Splits rows into true changes and flapping pairs.
+
+    A flap pair: exactly two rows for the same device where old_ua and
+    detected_ua are mirrors of each other (A->B and B->A). These are collapsed
+    into a single digest row with combined hit counts and both IPs shown when
+    they differ.
+
+    Everything else — single rows, 3+ rows, or non-mirroring pairs — is treated
+    as a true change and listed individually.
+
+    Returns (true_changes, flap_pairs) each sorted by hit_count DESC.
+    """
+    from collections import defaultdict
+    device_rows = defaultdict(list)
+    for row in rows:
+        key = (row['from_num'], row['domain'])
+        device_rows[key].append(row)
+
+    true_changes = []
+    flap_pairs   = []
+
+    for (from_num, domain), drows in device_rows.items():
+        if len(drows) == 2:
+            r0, r1 = drows[0], drows[1]
+            is_mirror = (
+                r0['old_ua'] == r1['detected_ua'] and
+                r0['detected_ua'] == r1['old_ua']
+            )
+            if is_mirror:
+                hits = (r0['hit_count'] or 0) + (r1['hit_count'] or 0)
+                ip_a = r0['detected_ip'] or ''
+                ip_b = r1['detected_ip'] or ''
+                combined_ip = ip_a if ip_a == ip_b else ' / '.join(filter(None, [ip_a, ip_b]))
+                fs = [x['first_seen'] for x in (r0, r1) if x['first_seen']]
+                ls = [x['last_seen']  for x in (r0, r1) if x['last_seen']]
+                flap_pairs.append({
+                    'from_num':    from_num,
+                    'domain':      domain,
+                    'ua_a':        r0['old_ua'] or '',
+                    'ua_b':        r0['detected_ua'] or '',
+                    'detected_ip': combined_ip,
+                    'first_seen':  min(fs) if fs else None,
+                    'last_seen':   max(ls) if ls else None,
+                    'hit_count':   hits,
+                })
+                continue
+        true_changes.extend(drows)
+
+    true_changes.sort(key=lambda r: -(r['hit_count'] or 0))
+    flap_pairs.sort(key=lambda r: -r['hit_count'])
+    return true_changes, flap_pairs
+
+# -----------------------------------------------------------------------
 # HTML email builder
 # -----------------------------------------------------------------------
 
+_TD = 'style="padding:6px 10px; border-bottom:1px solid #eee;'
+_TD_BOLD = _TD + ' font-weight:bold;"'
+_TD_CTR  = _TD + ' text-align:center; font-weight:bold;"'
+_TD_END  = _TD + '"'
+
+def _row_style(hits):
+    if hits >= 10:
+        return 'background:#FCEBEB; color:#3a1a1a;'
+    if hits >= 5:
+        return 'background:#fff8e1; color:#3a2e00;'
+    return ''
+
+def _fmt_ts(ts):
+    if ts and hasattr(ts, 'strftime'):
+        return ts.strftime('%Y-%m-%d %H:%M')
+    return ts or ''
+
+def _build_true_changes_table(rows):
+    if not rows:
+        return (
+            '<tr><td colspan="7" style="text-align:center;color:#888;padding:20px;">'
+            'No true UA changes in this period.</td></tr>'
+        )
+    body = ''
+    for row in rows:
+        device = f"{row['from_num']}@{row['domain']}"
+        rs = _row_style(row['hit_count'] or 0)
+        body += f"""
+        <tr style="{rs}">
+            <td {_TD_BOLD}>{device}</td>
+            <td {_TD_END}>{row['old_ua'] or ''}</td>
+            <td {_TD_END}>{row['detected_ua'] or ''}</td>
+            <td {_TD_END}>{row['detected_ip'] or ''}</td>
+            <td {_TD_END}>{_fmt_ts(row['first_seen'])}</td>
+            <td {_TD_END}>{_fmt_ts(row['last_seen'])}</td>
+            <td {_TD_CTR}>{row['hit_count']}</td>
+        </tr>"""
+    return body
+
+def _build_flap_table(flap_pairs):
+    if not flap_pairs:
+        return (
+            '<tr><td colspan="7" style="text-align:center;color:#888;padding:20px;">'
+            'No flapping devices in this period.</td></tr>'
+        )
+    body = ''
+    for fp in flap_pairs:
+        device = f"{fp['from_num']}@{fp['domain']}"
+        rs = _row_style(fp['hit_count'])
+        body += f"""
+        <tr style="{rs}">
+            <td {_TD_BOLD}>{device}</td>
+            <td {_TD_END}>{fp['ua_a']}</td>
+            <td {_TD_END}>{fp['ua_b']}</td>
+            <td {_TD_END}>{fp['detected_ip']}</td>
+            <td {_TD_END}>{_fmt_ts(fp['first_seen'])}</td>
+            <td {_TD_END}>{_fmt_ts(fp['last_seen'])}</td>
+            <td {_TD_CTR}>{fp['hit_count']}</td>
+        </tr>"""
+    return body
+
 def build_html(rows, generated_at, full_mode, since=None):
-    count = len(rows)
+    true_changes, flap_pairs = classify_rows(rows)
+    raw_count  = len(rows)
+    tc_count   = len(true_changes)
+    flap_count = len(flap_pairs)
 
     if full_mode:
         heading = "UA Monitor — Full Change Log Digest"
-        subtitle = f"Generated: {generated_at} &nbsp;|&nbsp; Total entries: <strong>{count}</strong>"
+        subtitle = (
+            f"Generated: {generated_at} &nbsp;|&nbsp; "
+            f"Total entries: <strong>{raw_count}</strong> &nbsp;|&nbsp; "
+            f"True changes: <strong>{tc_count}</strong> &nbsp;|&nbsp; "
+            f"Flapping devices: <strong>{flap_count}</strong> "
+            f"({raw_count - tc_count} raw entries collapsed)"
+        )
     else:
         since_str = since.strftime('%Y-%m-%d %H:%M') if since else 'beginning'
         heading = "UA Monitor — Daily Change Log Digest"
         subtitle = (
             f"Generated: {generated_at} &nbsp;|&nbsp; "
             f"New since: {since_str} &nbsp;|&nbsp; "
-            f"New entries: <strong>{count}</strong>"
+            f"New entries: <strong>{raw_count}</strong> &nbsp;|&nbsp; "
+            f"True changes: <strong>{tc_count}</strong> &nbsp;|&nbsp; "
+            f"Flapping devices: <strong>{flap_count}</strong>"
         )
 
-    if count == 0:
-        table_body = """
-        <tr>
-            <td colspan="7" style="text-align:center; color:#888; padding:20px;">
-                No new entries since last digest.
-            </td>
-        </tr>"""
-    else:
-        table_body = ""
-        for row in rows:
-            first_seen = row['first_seen']
-            last_seen  = row['last_seen']
-            if hasattr(first_seen, 'strftime'):
-                first_seen = first_seen.strftime('%Y-%m-%d %H:%M')
-            if hasattr(last_seen, 'strftime'):
-                last_seen = last_seen.strftime('%Y-%m-%d %H:%M')
-
-            device = f"{row['from_num']}@{row['domain']}"
-            old_ua = row['old_ua'] or ''
-            new_ua = row['detected_ua'] or ''
-            ip     = row['detected_ip'] or ''
-            hits   = row['hit_count']
-
-            if hits >= 10:
-                row_style = 'background:#fff3cd;'
-            elif hits >= 5:
-                row_style = 'background:#fff8e1;'
-            else:
-                row_style = ''
-
-            table_body += f"""
-            <tr style="{row_style}">
-                <td style="padding:6px 10px; border-bottom:1px solid #eee; font-weight:bold;">{device}</td>
-                <td style="padding:6px 10px; border-bottom:1px solid #eee;">{old_ua}</td>
-                <td style="padding:6px 10px; border-bottom:1px solid #eee;">{new_ua}</td>
-                <td style="padding:6px 10px; border-bottom:1px solid #eee;">{ip}</td>
-                <td style="padding:6px 10px; border-bottom:1px solid #eee;">{first_seen}</td>
-                <td style="padding:6px 10px; border-bottom:1px solid #eee;">{last_seen}</td>
-                <td style="padding:6px 10px; border-bottom:1px solid #eee; text-align:center; font-weight:bold;">{hits}</td>
-            </tr>"""
+    th_style  = 'style="background:#2c3e50; color:#fff; padding:8px 10px; text-align:left;"'
+    th_style_ctr = 'style="background:#2c3e50; color:#fff; padding:8px 10px; text-align:center;"'
+    section_hdr = (
+        'style="display:inline-block; font-size:12px; font-weight:bold; '
+        'letter-spacing:0.04em; text-transform:uppercase; '
+        'background:#2c3e50; color:#fff; padding:5px 12px; '
+        'margin:20px 0 0; border-radius:4px 4px 0 0;"'
+    )
 
     footer_note = (
         "Full digest — all active change_log entries shown."
@@ -170,11 +270,10 @@ def build_html(rows, generated_at, full_mode, since=None):
 <head>
 <meta charset="utf-8">
 <style>
-  body {{ font-family: Arial, sans-serif; font-size: 13px; color: #333; }}
-  h2   {{ color: #c0392b; }}
+  body  {{ font-family: Arial, sans-serif; font-size: 13px; color: #333; }}
+  h2    {{ color: #c0392b; }}
   table {{ border-collapse: collapse; width: 100%; max-width: 1100px; }}
-  th   {{ background:#2c3e50; color:#fff; padding:8px 10px; text-align:left; }}
-  tr:hover td {{ background:#f0f7ff; }}
+  th    {{ padding: 8px 10px; text-align: left; }}
   .footer {{ color:#999; font-size:11px; margin-top:16px; }}
 </style>
 </head>
@@ -182,26 +281,47 @@ def build_html(rows, generated_at, full_mode, since=None):
 <h2>{heading}</h2>
 <p>{subtitle}</p>
 
+<p {section_hdr}>True UA changes</p>
 <table>
   <thead>
     <tr>
-      <th>Device</th>
-      <th>Previous UA</th>
-      <th>Detected UA</th>
-      <th>Detected IP</th>
-      <th>First Seen</th>
-      <th>Last Seen</th>
-      <th>Hits</th>
+      <th {th_style}>Device</th>
+      <th {th_style}>Previous UA</th>
+      <th {th_style}>Detected UA</th>
+      <th {th_style}>Detected IP</th>
+      <th {th_style}>First Seen</th>
+      <th {th_style}>Last Seen</th>
+      <th {th_style_ctr}>Hits</th>
     </tr>
   </thead>
   <tbody>
-    {table_body}
+    {_build_true_changes_table(true_changes)}
+  </tbody>
+</table>
+
+<p {section_hdr}>Flapping devices</p>
+<table>
+  <thead>
+    <tr>
+      <th {th_style}>Device</th>
+      <th {th_style}>UA (A)</th>
+      <th {th_style}>UA (B)</th>
+      <th {th_style}>IPs seen</th>
+      <th {th_style}>First Seen</th>
+      <th {th_style}>Last Seen</th>
+      <th {th_style_ctr}>Hits</th>
+    </tr>
+  </thead>
+  <tbody>
+    {_build_flap_table(flap_pairs)}
   </tbody>
 </table>
 
 <p class="footer">
-  Entries age out after 30 days of inactivity.<br>
-  High-hit entries (5+) are highlighted yellow; entries with 10+ hits are amber.<br>
+  Flapping devices oscillate between two UAs; hit counts reflect both directions combined.<br>
+  Entries age out after 30 days of inactivity. A re-alert fires if the same UA reappears
+  after more than {CHANGE_LOG_STALENESS_HOURS}h of inactivity (staleness threshold).<br>
+  Row highlighting: red = 10+ hits, yellow = 5&ndash;9 hits.<br>
   {footer_note}<br>
   Contact support to investigate recurring or unexpected UA changes.
 </p>
