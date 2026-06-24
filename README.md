@@ -1,6 +1,8 @@
 ## USE AT YOUR OWN RISK, THIS IS NOT FULLY TESTED
 ## As always, have backups, and firewall.
 
+> Originally authored by [traviscw](https://github.com/traviscw/ua-monitor). Extended with PagerDuty support, a Python rewrite, auto alert mode, UA classification, change log deduplication, staleness re-arming, and a two-section daily digest by [True IP Solutions](https://github.com/true-ip-solutions).
+
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
 FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -47,7 +49,7 @@ Each alert is also written to a `change_log` table that deduplicates repeated no
 Downloads all files from GitHub and walks you through configuration interactively:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/traviscw/ua-monitor/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/true-ip-solutions/ua-monitor/main/install.sh | sudo bash
 ```
 
 You will be prompted for:
